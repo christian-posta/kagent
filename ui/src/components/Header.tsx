@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Button } from "./ui/button";
 import KAgentLogoWithText from "./kagent-logo-text";
 import KagentLogo from "./kagent-logo";
-import { Plus, Menu, X, ChevronDown, Brain, Server, Eye, Hammer, HomeIcon, Wrench, Database } from "lucide-react";
+import { Plus, Menu, X, ChevronDown, Brain, Server, Eye, Hammer, HomeIcon, Wrench, Database, PlayCircle } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import {
   DropdownMenu,
@@ -88,6 +88,12 @@ export function Header() {
                     New Memory
                   </Link>
                 </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <Link href="/simulations/new" className="gap-2 cursor-pointer w-full">
+                    <PlayCircle className="h-4 w-4" />
+                    New Simulation
+                  </Link>
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
             
@@ -128,6 +134,12 @@ export function Header() {
                   <Link href="/memories" className="gap-2 cursor-pointer w-full">
                     <Database className="h-4 w-4" />
                     Memory
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <Link href="/simulations" className="gap-2 cursor-pointer w-full">
+                    <PlayCircle className="h-4 w-4" />
+                    Simulations
                   </Link>
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -198,6 +210,12 @@ export function Header() {
                       Memory
                     </Link>
                   </DropdownMenuItem>
+                  <DropdownMenuItem asChild onClick={handleMobileLinkClick}>
+                    <Link href="/simulations" className="gap-2 cursor-pointer w-full">
+                      <PlayCircle className="h-4 w-4" />
+                      Simulations
+                    </Link>
+                  </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
 
@@ -239,6 +257,12 @@ export function Header() {
                     <Link href="/memories/new" className="gap-2 cursor-pointer w-full">
                       <Database className="h-4 w-4" />
                       New Memory
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild onClick={handleMobileLinkClick}>
+                    <Link href="/simulations/new" className="gap-2 cursor-pointer w-full">
+                      <PlayCircle className="h-4 w-4" />
+                      New Simulation
                     </Link>
                   </DropdownMenuItem>
                 </DropdownMenuContent>
