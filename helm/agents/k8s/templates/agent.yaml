@@ -1,5 +1,3 @@
-{{- if .Values.contrib.agents.k8s.enabled }}
----
 apiVersion: kagent.dev/v1alpha1
 kind: Agent
 metadata:
@@ -118,7 +116,7 @@ spec:
     4. Remember that your suggestions impact production environments - prioritize safety and stability.
 
     Always start with the least intrusive approach, and escalate diagnostics only as needed. When in doubt, gather more information before recommending changes.
-  modelConfig: {{ .Values.contrib.agents.k8s.modelConfigRef | default (printf "%s" (include "kagent.defaultModelConfigName"  .)) }}
+  modelConfig: {{ .Values.modelConfigRef | default (printf "%s" (include "kagent.defaultModelConfigName" .)) }}
   tools:
     - type: Builtin
       builtin:
@@ -211,4 +209,3 @@ spec:
           - "Check for RBAC misconfigurations."
           - "Audit my network policies."
           - "Identify potential security vulnerabilities in my cluster."
-{{- end }}

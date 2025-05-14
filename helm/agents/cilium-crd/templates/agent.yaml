@@ -1,14 +1,13 @@
-{{- if .Values.contrib.agents.ciliumCRD.enabled }}
----
 apiVersion: kagent.dev/v1alpha1
 kind: Agent
 metadata:
   name: cilium-crd-agent
+  namespace: {{ include "kagent.namespace" . }}
   labels:
     {{- include "kagent.labels" . | nindent 4 }}
 spec:
   description: Cilium CRD agents knows how to create CiliumNetworkPolicy and CiliumClusterwideNetworkPolicy resources from natural language
-  modelConfig: {{ .Values.contrib.agents.promql.modelConfigRef | default (printf "%s" (include "kagent.defaultModelConfigName"  .)) }}
+  modelConfig: {{ .Values.modelConfigRef | default (printf "%s" (include "kagent.defaultModelConfigName" .)) }}
   systemMessage: |-
     You are a CiliumNetworkPolicy and CiliumClusterwideNetworkPolicy agent that knows how to create valid YAML configurations based on user request.
 
@@ -439,5 +438,3 @@ spec:
       - DNS policies don't support port ranges
       - L7 rules for Host policies only support DNS (not HTTP/Kafka)
       - `fromRequires`/`toRequires` are deprecated in 1.17.x - do not use them
-
-{{ end }}
