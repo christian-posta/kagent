@@ -149,6 +149,8 @@ contrib:
       enabled: true
     kgateway:
       enabled: true
+    ciliumCRD:
+      enabled: true
 
 otel:
   tracing:
