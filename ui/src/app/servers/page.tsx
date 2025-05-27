@@ -36,10 +36,16 @@ export default function ServersPage() {
       // Fetch servers
       const serversResponse = await getServers();
       if (serversResponse.success && serversResponse.data) {
-        setServers(serversResponse.data);
+        // Sort servers by name
+        const sortedServers = [...serversResponse.data].sort((a, b) => {
+          const nameA = a.name || '';
+          const nameB = b.name || '';
+          return nameA.localeCompare(nameB);
+        });
+        setServers(sortedServers);
 
         // Initially expand all servers
-        const serverNames = serversResponse.data.map((server) => server.name).filter((name): name is string => name !== undefined);
+        const serverNames = sortedServers.map((server) => server.name).filter((name): name is string => name !== undefined);
 
         setExpandedServers(new Set(serverNames));
       } else {
