@@ -1,5 +1,5 @@
 import pytest
-from _yaml_comparer import YAMLComparer
+from ._yaml_comparer import YAMLComparer
 
 def test_normalize_structure_removes_status_and_metadata():
     input_yaml = {
