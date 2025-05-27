@@ -35,7 +35,7 @@ interface AgentPageContentProps {
   agentId: string | null;
 }
 
-const DEFAULT_SYSTEM_PROMPT = `You're an XYZ agent, made by the kagent team at Solo.io.
+const DEFAULT_SYSTEM_PROMPT = `You're a helpful agent, made by the kagent team.
 
 # Instructions
     - If user question is unclear, ask for clarification before running any tools
