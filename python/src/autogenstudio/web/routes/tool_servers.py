@@ -13,8 +13,8 @@ router = APIRouter()
 async def list_servers(user_id: str, db=Depends(get_db)) -> Dict:
     response = db.get(ToolServer, filters={"user_id": user_id})
     if response.status and response.data:
-        # Sort servers by name
-        response.data.sort(key=lambda x: x.name or '')
+        # Sort servers by component label
+        response.data.sort(key=lambda x: x.component.label or '')
     return {"status": True, "data": response.data}
 
 
