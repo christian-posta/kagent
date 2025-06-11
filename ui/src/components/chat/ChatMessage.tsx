@@ -65,7 +65,7 @@ export default function ChatMessage({ message, allMessages }: ChatMessageProps) 
     setIsPositiveFeedback(isPositive);
     setFeedbackDialogOpen(true);
   };
-  
+
   const messageBorderColor = isErrorMessage ? "border-l-red-500" : source === "user" ? "border-l-blue-500" : "border-l-violet-500";
   return <div className={`flex items-center gap-2 text-sm border-l-2 py-2 px-4 ${messageBorderColor}`}>
     <div className="flex flex-col gap-1 w-full">
@@ -76,7 +76,12 @@ export default function ChatMessage({ message, allMessages }: ChatMessageProps) 
       <TruncatableText content={String(content)} className="break-all text-primary-foreground" />
       
       {source !== "user" && messageId !== undefined && (
-        <div className="flex mt-2 justify-end gap-2">
+        <div className="flex mt-2 justify-end items-center gap-2">
+           {message.metadata?.duration && (
+            <div className="text-xs text-muted-foreground">
+              {Number(message.metadata.duration).toFixed(2)}s
+            </div>
+          )}
           <button 
             onClick={() => handleFeedback(true)}
             className="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
