@@ -77,9 +77,15 @@ export default function ChatMessage({ message, allMessages }: ChatMessageProps) 
       
       {source !== "user" && messageId !== undefined && (
         <div className="flex mt-2 justify-end items-center gap-2">
-           {message.metadata?.duration && (
+           {message.metadata?.created_at && (
             <div className="text-xs text-muted-foreground">
-              {Number(message.metadata.duration).toFixed(2)}s
+              {new Date(Number(message.metadata.created_at) * 1000).toLocaleString()}
+              {message.metadata.duration != null && (
+                <>
+                  <span className="mx-1">-</span>
+                  {Number(message.metadata.duration).toFixed(2)}s
+                </>
+              )}
             </div>
           )}
           <button 
