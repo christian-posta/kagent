@@ -14,6 +14,7 @@ mcp = FastMCP("KAgent")
 def serve(
     host: str = "127.0.0.1",
     port: int = 8081,
+    reload: bool = False,
 ):
     import logging
     import os
@@ -38,7 +39,7 @@ def serve(
         HTTPXClientInstrumentor().instrument()
         OpenAIInstrumentor().instrument()
 
-    ui(host=host, port=port)
+    ui(host=host, port=port, reload=reload)
 
 
 def run():
