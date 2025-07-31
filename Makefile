@@ -233,8 +233,13 @@ helm-agents:
 	VERSION=$(VERSION) envsubst < helm/agents/cilium-manager/Chart-template.yaml > helm/agents/cilium-manager/Chart.yaml
 	helm package -d $(HELM_DIST_FOLDER) helm/agents/cilium-manager
 
+.PHONY: helm-tools
+helm-tools:
+	VERSION=$(VERSION) envsubst < helm/tools/querydoc/Chart-template.yaml > helm/tools/querydoc/Chart.yaml
+	helm package -d $(HELM_DIST_FOLDER) helm/tools/querydoc
+
 .PHONY: helm-version
-helm-version: helm-cleanup helm-agents
+helm-version: helm-cleanup helm-agents helm-tools
 	VERSION=$(VERSION) envsubst < helm/kagent-crds/Chart-template.yaml > helm/kagent-crds/Chart.yaml
 	VERSION=$(VERSION) envsubst < helm/kagent/Chart-template.yaml > helm/kagent/Chart.yaml
 	helm dependency update helm/kagent
@@ -257,17 +262,19 @@ helm-install-provider: helm-version check-openai-key
 		--timeout 5m       \
 		--kube-context kind-$(KIND_CLUSTER_NAME) \
 		--wait \
-		--set service.type=LoadBalancer \
-		--set controller.image.registry=$(RETAGGED_DOCKER_REGISTRY) \
+		--set ui.service.type=LoadBalancer \
 		--set ui.image.registry=$(RETAGGED_DOCKER_REGISTRY) \
-		--set app.image.registry=$(RETAGGED_DOCKER_REGISTRY) \
-		--set controller.image.tag=$(CONTROLLER_IMAGE_TAG) \
 		--set ui.image.tag=$(UI_IMAGE_TAG) \
-		--set app.image.tag=$(APP_IMAGE_TAG) \
+		--set controller.image.registry=$(RETAGGED_DOCKER_REGISTRY) \
+		--set controller.image.tag=$(CONTROLLER_IMAGE_TAG) \
+		--set controller.service.type=LoadBalancer \
+		--set engine.image.registry=$(RETAGGED_DOCKER_REGISTRY) \
+		--set engine.image.tag=$(APP_IMAGE_TAG) \
 		--set providers.openAI.apiKey=$(OPENAI_API_KEY) \
 		--set providers.azureOpenAI.apiKey=$(AZUREOPENAI_API_KEY) \
 		--set providers.anthropic.apiKey=$(ANTHROPIC_API_KEY) \
 		--set providers.default=$(KAGENT_DEFAULT_MODEL_PROVIDER) \
+		--set querydoc.openai.apiKey=$(OPENAI_API_KEY) \
 		$(KAGENT_HELM_EXTRA_ARGS)
 
 .PHONY: helm-install
