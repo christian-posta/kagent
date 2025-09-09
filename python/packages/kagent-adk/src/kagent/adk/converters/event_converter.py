@@ -20,6 +20,7 @@ from kagent.core.a2a import (
     get_kagent_metadata_key,
 )
 
+from .error_mappings import _get_error_message, _is_normal_completion
 from .part_converter import (
     convert_genai_part_to_a2a_part,
 )
@@ -27,7 +28,6 @@ from .part_converter import (
 # Constants
 
 ARTIFACT_ID_SEPARATOR = "-"
-DEFAULT_ERROR_MESSAGE = "An error occurred during processing"
 
 # Logger
 logger = logging.getLogger("kagent_adk." + __name__)
@@ -191,12 +191,15 @@ def _create_error_status_event(
     Returns:
       A TaskStatusUpdateEvent with FAILED state.
     """
-    error_message = getattr(event, "error_message", None) or DEFAULT_ERROR_MESSAGE
+    error_message = getattr(event, "error_message", None)
 
     # Get context metadata and add error code
     event_metadata = _get_context_metadata(event, invocation_context)
     if event.error_code:
         event_metadata[get_kagent_metadata_key("error_code")] = str(event.error_code)
+
+        if not error_message:
+            error_message = _get_error_message(event.error_code)
 
     return TaskStatusUpdateEvent(
         task_id=task_id,
@@ -298,7 +301,7 @@ def convert_event_to_a2a_events(
 
     try:
         # Handle error scenarios
-        if event.error_code:
+        if event.error_code and not _is_normal_completion(event.error_code):
             error_event = _create_error_status_event(event, invocation_context, task_id, context_id)
             a2a_events.append(error_event)
 
