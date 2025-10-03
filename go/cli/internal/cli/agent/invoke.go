@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kagent-dev/kagent/go/cli/internal/config"
@@ -76,6 +77,12 @@ func InvokeCmd(ctx context.Context, cfg *InvokeCfg) {
 	} else {
 		if cfg.Agent == "" {
 			fmt.Fprintln(os.Stderr, "Agent is required")
+			return
+		}
+
+		// Error out if the agent is provided with the namespace (e.g., namespace/agent-name)
+		if strings.Contains(cfg.Agent, "/") {
+			fmt.Fprintf(os.Stderr, "Invalid agent format: use --namespace to specify the namespace. Got'%s'\n", cfg.Agent)
 			return
 		}
 
