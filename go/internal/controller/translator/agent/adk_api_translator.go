@@ -351,10 +351,8 @@ func (a *adkApiTranslator) buildManifest(
 			},
 		},
 		corev1.EnvVar{
-			Name: "KAGENT_NAME",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.serviceAccountName"},
-			},
+			Name:  "KAGENT_NAME",
+			Value: agent.Name,
 		},
 		corev1.EnvVar{
 			Name:  "KAGENT_URL",
