@@ -66,4 +66,27 @@ var (
 		"Well-known endpoint for the Security Token Service (STS) used for token exchange.",
 		ComponentAgentRuntime,
 	)
+
+	AAuthEnabled = RegisterStringVar(
+		"AAUTH_ENABLED",
+		"false",
+		"When true, enables AAuth (RFC 9421 HTTP Message Signatures) for all outbound agent requests.",
+		ComponentAgentRuntime,
+	)
+
+	AAuthAgentID = RegisterStringVar(
+		"AAUTH_AGENT_ID",
+		"",
+		"AAuth agent identifier URI, of the form aauth:<name>@<namespace>.kagent.local.",
+		ComponentAgentRuntime,
+	)
+
+	AAuthControllerURL = RegisterStringVar(
+		"AAUTH_CONTROLLER_URL",
+		"",
+		"URL the agent uses to reach the kagent controller's AAuth Agent Provider endpoints "+
+			"(/aauth/agent-jwt, /.well-known/jwks.json). When unset, the agent falls back to "+
+			"the hwk (pseudonymous) signature scheme. Phase 2.",
+		ComponentAgentRuntime,
+	)
 )

@@ -93,10 +93,14 @@ class KAgentApp:
 
         if not local:
             token_service = KAgentTokenService(self.app_name)
+            hooks = token_service.event_hooks()
+            from kagent.adk.aauth import get_signer
+            signer = get_signer()
+            if signer:
+                hooks["request"].append(signer.make_hook())
             http_client = httpx.AsyncClient(
-                # TODO: add user  and agent headers
                 base_url=kagent_url_override or self.kagent_url,
-                event_hooks=token_service.event_hooks(),
+                event_hooks=hooks,
             )
             session_service = KAgentSessionService(http_client)
 

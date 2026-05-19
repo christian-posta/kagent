@@ -225,6 +225,22 @@ type DeclarativeAgentSpec struct {
 	// This includes event compaction (compression) and context caching.
 	// +optional
 	Context *ContextConfig `json:"context,omitempty"`
+
+	// AAuth configures opt-in AAuth (HTTP Message Signatures) for outbound requests.
+	// When enabled, every outbound HTTP request from this agent is signed using an
+	// ephemeral Ed25519 key following draft-hardt-oauth-aauth-protocol (hwk scheme).
+	// Disabled by default; enabling is safe alongside existing auth mechanisms.
+	// +optional
+	AAuth *AAuthConfig `json:"aauth,omitempty"`
+}
+
+// AAuthConfig configures opt-in AAuth (HTTP Message Signatures) for outbound agent requests.
+type AAuthConfig struct {
+	// Enabled turns on AAuth signing for this agent's outbound requests.
+	// When true, the agent pod receives AAUTH_ENABLED=true and AAUTH_AGENT_ID env vars.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // SandboxConfig configures sandboxed execution behavior.

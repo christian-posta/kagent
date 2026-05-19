@@ -357,6 +357,29 @@ func collectSharedEnv(agent v1alpha2.AgentObject) []corev1.EnvVar {
 			Value: fmt.Sprintf("http://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace()),
 		},
 	)
+
+	spec := agent.GetAgentSpec()
+	if spec.Declarative != nil && spec.Declarative.AAuth != nil && spec.Declarative.AAuth.Enabled {
+		sharedEnv = append(sharedEnv,
+			corev1.EnvVar{
+				Name:  env.AAuthEnabled.Name(),
+				Value: "true",
+			},
+			corev1.EnvVar{
+				Name:  env.AAuthAgentID.Name(),
+				Value: fmt.Sprintf("aauth:%s@%s.kagent.local", agent.GetName(), agent.GetNamespace()),
+			},
+			// Phase 2: point the agent at the controller's Agent Provider so it can
+			// fetch an aa-agent+jwt at startup. Same in-cluster URL the agent uses
+			// for sessions/tasks (KAGENT_URL above) — repeated here as a distinct
+			// var so the AAuth signer doesn't need to know the rest of kagent.
+			corev1.EnvVar{
+				Name:  env.AAuthControllerURL.Name(),
+				Value: fmt.Sprintf("http://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace()),
+			},
+		)
+	}
+
 	return sharedEnv
 }
 

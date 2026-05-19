@@ -291,6 +291,8 @@ def test(
 def run_cli():
     configure_logging()
     logger.info("Starting KAgent")
+    from kagent.adk.aauth import init_signer
+    init_signer()
     app()
 
 

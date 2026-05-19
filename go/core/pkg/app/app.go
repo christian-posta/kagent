@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/kagent-dev/kagent/go/core/internal/a2a"
+	"github.com/kagent-dev/kagent/go/core/internal/aauth"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/mcp"
 	versionmetrics "github.com/kagent-dev/kagent/go/core/internal/metrics"
@@ -65,6 +66,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -855,21 +857,57 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		}
 	}
 
+	// AAuth Phase 2: optionally bring up the controller-side Agent Provider.
+	// Disabled when AAUTH_ISSUER_URL is unset — agents with spec.aauth.enabled=true
+	// will then fall back to Phase 1 (hwk) behavior.
+	//
+	// The issuer keypair is persisted in a Secret so JWKS stays stable across
+	// controller restarts (otherwise every restart would invalidate every
+	// outstanding aa-agent+jwt).
+	var (
+		aauthIssuer  *aauth.Issuer
+		aauthSubject aauth.SubjectAuthenticator
+	)
+	if issURL := os.Getenv("AAUTH_ISSUER_URL"); issURL != "" {
+		priv, pub, kid, err := aauth.LoadOrGenerateIssuerKey(ctx, mgr.GetConfig(), kagentNamespace, aauth.IssuerSecretName)
+		if err != nil {
+			setupLog.Error(err, "unable to load or generate AAuth issuer key")
+			os.Exit(1)
+		}
+		aauthIssuer, err = aauth.NewIssuerFromKey(priv, pub, kid, issURL, 24*time.Hour)
+		if err != nil {
+			setupLog.Error(err, "unable to create AAuth issuer")
+			os.Exit(1)
+		}
+		// SubjectAuthenticator for POST /aauth/agent-jwt — validates the
+		// caller's K8s ServiceAccount token via TokenReview and derives
+		// the canonical sub from system:serviceaccount:<ns>:<name>.
+		k8sClient, err := kubernetes.NewForConfig(mgr.GetConfig())
+		if err != nil {
+			setupLog.Error(err, "unable to build kubernetes clientset for AAuth TokenReview")
+			os.Exit(1)
+		}
+		aauthSubject = &aauth.K8sSubjectAuthenticator{Client: k8sClient}
+		setupLog.Info("AAuth issuer enabled", "issuerURL", issURL, "kid", kid, "secret", kagentNamespace+"/"+aauth.IssuerSecretName)
+	}
+
 	httpServer, err := httpserver.NewHTTPServer(httpserver.ServerConfig{
-		Router:              router,
-		BindAddr:            cfg.HttpServerAddr,
-		KubeClient:          mgr.GetClient(),
-		A2AHandler:          a2aHandler,
-		MCPHandler:          mcpHandler,
-		WatchedNamespaces:   watchNamespacesList,
-		DbClient:            dbClient,
-		Authorizer:          extensionCfg.Authorizer,
-		Authenticator:       extensionCfg.Authenticator,
-		ProxyURL:            cfg.Proxy.URL,
-		Reconciler:             rcnclr,
-		SandboxBackend:         extensionCfg.SandboxBackend,
-		AgentHarnessGateway:    agentHarnessGatewayCfg,
-		SubstrateHarnessClient: substrateHarnessClient,
+		Router:                    router,
+		BindAddr:                  cfg.HttpServerAddr,
+		KubeClient:                mgr.GetClient(),
+		A2AHandler:                a2aHandler,
+		MCPHandler:                mcpHandler,
+		WatchedNamespaces:         watchNamespacesList,
+		DbClient:                  dbClient,
+		Authorizer:                extensionCfg.Authorizer,
+		Authenticator:             extensionCfg.Authenticator,
+		ProxyURL:                  cfg.Proxy.URL,
+		Reconciler:                rcnclr,
+		SandboxBackend:            extensionCfg.SandboxBackend,
+		AgentHarnessGateway:       agentHarnessGatewayCfg,
+		SubstrateHarnessClient:    substrateHarnessClient,
+		AAuthIssuer:               aauthIssuer,
+		AAuthSubjectAuthenticator: aauthSubject,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create HTTP server")

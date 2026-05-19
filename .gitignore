@@ -214,3 +214,7 @@ file::memory:*
 ## Test certificates
 python/packages/kagent-adk/tests/fixtures/certs/*.pem
 python/packages/kagent-adk/tests/fixtures/certs/*.srl
+
+## AAuth demo keys (generated locally, never commit private keys)
+demo/aauth/resource_key.pem
+demo/aauth/resource_pub.pem

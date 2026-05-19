@@ -34,12 +34,21 @@ class KAgentAnthropicLlm(KAgentTLSMixin, AnthropicLlm):
         self.__dict__.pop("_http_client", None)
 
     def _create_http_client(self):
-        """Create HTTP client with custom SSL context using Anthropic SDK defaults.
+        """Create HTTP client with custom SSL context and optional AAuth signing.
 
         Returns:
-            httpx.AsyncClient with SSL configuration, or None if no TLS config
+            httpx.AsyncClient with SSL/AAuth configuration, or None if neither is configured
         """
-        return self._httpx_async_client_if_tls()
+        from kagent.adk.aauth import get_signer
+        signer = get_signer()
+        extra: dict = {}
+        if signer:
+            extra["event_hooks"] = {"request": [signer.make_hook()]}
+        if self._has_tls_config():
+            return self._httpx_async_client_if_tls(**extra)
+        if signer:
+            return httpx.AsyncClient(**extra)
+        return None
 
     @cached_property
     def _anthropic_client(self) -> AsyncAnthropic:

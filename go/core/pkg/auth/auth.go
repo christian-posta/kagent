@@ -77,7 +77,13 @@ func AuthnMiddleware(authn AuthProvider) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip authentication for health and version endpoints (used by probes)
-			if r.URL.Path == "/health" || r.URL.Path == "/version" {
+			// and for AAuth Agent Provider endpoints (public discovery + JWT issuance;
+			// the JWT issue endpoint is the agent's bootstrap credential and is reached
+			// before the agent has any other auth material — Phase 3 will TokenReview it).
+			if r.URL.Path == "/health" || r.URL.Path == "/version" ||
+				r.URL.Path == "/.well-known/jwks.json" ||
+				r.URL.Path == "/.well-known/aauth-agent.json" ||
+				r.URL.Path == "/aauth/agent-jwt" {
 				next.ServeHTTP(w, r)
 				return
 			}

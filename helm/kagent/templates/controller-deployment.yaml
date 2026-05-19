@@ -84,6 +84,12 @@ spec:
             {{- else }}
             {{ fail "No database connection configured. Set database.postgres.url, database.postgres.urlFile, or enable database.postgres.bundled." }}
             {{- end }}
+            {{- if .Values.controller.aauth }}
+            {{- if .Values.controller.aauth.issuerUrl }}
+            - name: AAUTH_ISSUER_URL
+              value: {{ .Values.controller.aauth.issuerUrl | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.controller.env }}
               {{- toYaml . | nindent 12 }}
             {{- end }}

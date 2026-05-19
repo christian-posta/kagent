@@ -399,16 +399,25 @@ class BaseOpenAI(KAgentTLSMixin, BaseLlm):
         return [r"gpt-.*", r"o1-.*"]
 
     def _create_http_client(self) -> Optional[httpx.AsyncClient]:
-        """Create HTTP client with custom SSL context using OpenAI SDK defaults.
+        """Create HTTP client with custom SSL context and optional AAuth signing.
 
         Uses DefaultAsyncHttpxClient to preserve OpenAI's default settings for
         timeout, connection pooling, and redirect behavior while applying custom
-        SSL configuration.
+        SSL configuration and AAuth event hooks when enabled.
 
         Returns:
-            DefaultAsyncHttpxClient with SSL configuration, or None if no TLS config
+            DefaultAsyncHttpxClient with SSL/AAuth configuration, or None if neither is configured
         """
-        return self._httpx_async_client_if_tls(DefaultAsyncHttpxClient)
+        from kagent.adk.aauth import get_signer
+        signer = get_signer()
+        extra: dict = {}
+        if signer:
+            extra["event_hooks"] = {"request": [signer.make_hook()]}
+        if self._has_tls_config():
+            return self._httpx_async_client_if_tls(DefaultAsyncHttpxClient, **extra)
+        if signer:
+            return DefaultAsyncHttpxClient(**extra)
+        return None
 
     @cached_property
     def _client(self) -> AsyncOpenAI:

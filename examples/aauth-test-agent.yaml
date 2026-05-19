@@ -1,0 +1,33 @@
+---
+# Sample Agent with AAuth signing enabled.
+# Deploy this to test AAuth headers end-to-end through agentgateway.
+#
+# Prerequisites:
+#   make create-kind-cluster && make helm-install
+#   kubectl apply -f examples/aauth-test-agent.yaml
+#
+# Verify env vars are injected:
+#   kubectl exec -n kagent deploy/aauth-test-agent -- env | grep AAUTH
+#
+# Verify AAuth headers reach extauth (see demo/aauth/README.md).
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: aauth-test-agent
+  namespace: kagent
+spec:
+  type: Declarative
+  description: "Test agent for AAuth signing verification"
+  declarative:
+    modelConfig: aauth-model-config
+    systemMessage: |
+      You are a test agent used to verify AAuth HTTP Message Signatures.
+      Just respond briefly to whatever is asked.
+    aauth:
+      enabled: true
+    a2aConfig:
+      skills:
+      - id: aauth-test
+        name: AAuth Test
+        description: Echo whatever the user says to verify outbound HTTP calls are signed.
+        tags: [test, aauth]
