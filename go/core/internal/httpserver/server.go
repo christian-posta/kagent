@@ -10,6 +10,7 @@ import (
 	dbpkg "github.com/kagent-dev/kagent/go/api/database"
 	api "github.com/kagent-dev/kagent/go/api/httpapi"
 	"github.com/kagent-dev/kagent/go/core/internal/a2a"
+	"github.com/kagent-dev/kagent/go/core/internal/aauth"
 	"github.com/kagent-dev/kagent/go/core/internal/controller/reconciler"
 	"github.com/kagent-dev/kagent/go/core/internal/httpserver/handlers"
 	"github.com/kagent-dev/kagent/go/core/internal/mcp"
@@ -71,6 +72,13 @@ type ServerConfig struct {
 	ProxyURL          string
 	Reconciler        reconciler.KagentReconciler
 	SandboxBackend    sandboxbackend.Backend
+	// AAuthIssuer mints aa-agent+jwt tokens for declarative agents that
+	// have spec.aauth.enabled=true. nil disables the issuer routes.
+	AAuthIssuer *aauth.Issuer
+	// AAuthSubjectAuthenticator validates the caller's bearer token on
+	// POST /aauth/agent-jwt and returns the canonical agent identifier.
+	// Required when AAuthIssuer is set.
+	AAuthSubjectAuthenticator aauth.SubjectAuthenticator
 }
 
 // HTTPServer is the structure that manages the HTTP server
@@ -310,6 +318,18 @@ func (s *HTTPServer) setupRoutes() {
 	// MCP
 	if s.config.MCPHandler != nil {
 		s.router.PathPrefix(APIPathMCP).Handler(s.config.MCPHandler)
+	}
+
+	// AAuth Agent Provider endpoints. These are bypassed by the authn
+	// middleware (see auth.AuthnMiddleware) because the well-known paths
+	// are public discovery documents, and the JWT issue endpoint is
+	// reached by agent pods before they have any bearer credential.
+	// Phase 3 hardening: validate the caller's projected SA token on
+	// /aauth/agent-jwt via TokenReview.
+	if s.config.AAuthIssuer != nil {
+		s.router.HandleFunc(aauth.PathJWKS, aauth.HandleJWKS(s.config.AAuthIssuer)).Methods(http.MethodGet)
+		s.router.HandleFunc(aauth.PathAgentMetadata, aauth.HandleAgentMetadata(s.config.AAuthIssuer)).Methods(http.MethodGet)
+		s.router.HandleFunc(aauth.PathAgentJWT, aauth.HandleIssueAgentJWT(s.config.AAuthIssuer, s.config.AAuthSubjectAuthenticator)).Methods(http.MethodPost)
 	}
 
 	// Use middleware for common functionality (first registered runs outermost on incoming requests).

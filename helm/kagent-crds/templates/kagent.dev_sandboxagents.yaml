@@ -5387,6 +5387,20 @@ spec:
                         minItems: 1
                         type: array
                     type: object
+                  aauth:
+                    description: |-
+                      AAuth configures opt-in AAuth (HTTP Message Signatures) for outbound requests.
+                      When enabled, every outbound HTTP request from this agent is signed using an
+                      ephemeral Ed25519 key following draft-hardt-oauth-aauth-protocol (hwk scheme).
+                      Disabled by default; enabling is safe alongside existing auth mechanisms.
+                    properties:
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled turns on AAuth signing for this agent's outbound requests.
+                          When true, the agent pod receives AAUTH_ENABLED=true and AAUTH_AGENT_ID env vars.
+                        type: boolean
+                    type: object
                   context:
                     description: |-
                       Context configures context management for this agent.

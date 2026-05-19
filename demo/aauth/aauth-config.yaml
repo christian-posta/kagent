@@ -1,0 +1,105 @@
+# extauth-aauth-resource configuration for kagent AAuth demo
+#
+# Protects all traffic that passes through agentgateway (see agw-config.yaml).
+# Accepts requests signed with the hwk (bare-key) scheme — this is what kagent
+# agents produce when AAUTH_ENABLED=true (Phase 1 ephemeral Ed25519 keypair).
+#
+# Run from the extauth-aauth-resource repo root:
+#   AAUTH_CONFIG=/path/to/kagent/demo/aauth/aauth-config.yaml ./aauth-service
+#
+# Prerequisites:
+#   - Generate a resource keypair once (see demo/aauth/README.md).
+#   - Set AAUTH_CONFIG to this file's absolute path.
+
+listen:
+  # gRPC endpoint for agentgateway ext_authz
+  grpc: ":7070"
+  # HTTP endpoint for /.well-known/aauth-resource.json and /.well-known/jwks.json
+  http: ":8080"
+
+jwks_cache:
+  # Short TTL is fine for local demo; increase in production.
+  success_ttl: 5m
+  error_ttl:   30s
+  max_entries: 1000
+
+resources:
+  - id: kagent-agents
+
+    # Issuer URL for this resource (used in challenge headers and metadata).
+    # For local demo the HTTP scheme is fine; production should use HTTPS.
+    issuer: "http://localhost:8080"
+    client_name: "Kagent Agent API"
+
+    # Host values that map to this resource when aauth_resource_id is not sent
+    # in the CheckRequest context extensions (fallback path).
+    #
+    # agentgateway strips the port from GetHost() before the CheckRequest, so
+    # BOTH the bare hostname and the host:port form must be listed here.
+    # When aauth_resource_id IS sent (as in agw-config.yaml), these are ignored
+    # for routing — but it is still good practice to keep them accurate.
+    hosts:
+      - "host.docker.internal"        # what agentgateway puts in GetHost() (port stripped)
+      - "host.docker.internal:3030"   # original Host header as signed by the agent
+      - "localhost"                   # for local curl tests without host.docker.internal
+      - "localhost:3030"
+
+    signing_key:
+      kid: "kagent-demo-key"
+      alg: EdDSA
+      # Path to the resource Ed25519 private key. Generate with:
+      #   openssl genpkey -algorithm ed25519 -out demo/aauth/resource_key.pem
+      # Note: this path is resolved relative to extauth's working directory,
+      # so use an absolute path or run extauth from the kagent repo root.
+      private_key_file: "/Users/ceposta/go/src/github.com/kagent-dev/kagent/demo/aauth/resource_key.pem"
+
+    # How long a received HTTP Message Signature is valid.
+    signature_window: 60s
+
+    # ── jwt (identified) scheme — Phase 2 ─────────────────────────────────────
+    # Agents present an aa-agent+jwt issued by the kagent controller. The JWT
+    # binds the agent's signing public key (cnf.jwk) to its kagent identity
+    # (sub=aauth:<name>@<ns>.kagent.local). Identity level will be "identified".
+    allow_pseudonymous: false
+
+    # Strip the AAuth signature headers before forwarding to the upstream backend.
+    # The upstream (e.g. OpenAI) does not need to see them.
+    strip_signature_headers: true
+
+    # Authority override for signature verification.
+    #
+    # agentgateway preserves the original Host header value in the CheckRequest
+    # headers map (only GetHost() is stripped of the port). The mergeGetHostAndHeader
+    # logic in extauth therefore reconstructs "host.docker.internal:3030" correctly
+    # from the headers, so authority_override is NOT required in the normal flow.
+    #
+    # Uncomment ONLY if you see authority-mismatch failures and have confirmed that
+    # agentgateway is stripping the port from the Host header as well:
+    #
+    # authority_override: "host.docker.internal:3030"
+
+    # Access mode: identity = hwk/pseudonymous is sufficient to allow the request.
+    access:
+      require: identity
+
+    allowed_signature_key_schemes:
+      - jwt
+    allowed_jwt_types:
+      - aa-agent+jwt
+
+    # The kagent controller is the only allowed Agent Provider for this resource.
+    # `issuer` must match exactly the `iss` claim in the JWT (which the controller
+    # sets to AAUTH_ISSUER_URL). `jwks_uri` is what extauth fetches to verify the
+    # JWT signature. Both are http://localhost:8083 here because extauth runs on
+    # the host and a kubectl port-forward exposes the controller HTTP server there.
+    agent_servers:
+      - issuer: "http://localhost:8083"
+        jwks_uri: "http://localhost:8083/.well-known/jwks.json"
+
+    # Required: aauth-go-library rejects http:// issuers by default; this flag
+    # lets it accept http:// when the host is localhost/127.0.0.1/::1/*.localhost.
+    # Keep this OFF in production (require HTTPS for the controller).
+    allow_insecure_jwt_issuer: true
+
+    policy:
+      name: default

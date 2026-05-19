@@ -38,6 +38,7 @@ dependencies = [
   "boto3>=1.28.57",
   "ollama >=0.3.6",  # Ollama SDK
   "numpy>=2.2.6",
+  "aauth",  # AAuth HTTP Message Signatures (draft-hardt-oauth-aauth-protocol)
 ]
 
 [tool.uv.sources]
@@ -45,6 +46,7 @@ kagent-core = {workspace = true}
 kagent-skills = {workspace = true}
 agentsts-adk = {workspace = true}
 agentsts-core = {workspace = true}
+aauth = { git = "https://github.com/christian-posta/aauth-python-library" }
 
 [project.scripts]
 kagent-adk = "kagent.adk.cli:run_cli"

@@ -1,0 +1,28 @@
+{{/*
+Binds the kagent-controller ServiceAccount to the built-in
+system:auth-delegator ClusterRole so the controller can call
+TokenReview against the kube-apiserver.
+
+This is required by the AAuth Agent Provider endpoint
+(POST /aauth/agent-jwt): the controller validates each calling pod's
+ServiceAccount token before minting an aa-agent+jwt and derives the
+canonical sub from the SA's username (system:serviceaccount:<ns>:<name>).
+
+The binding is always a ClusterRoleBinding regardless of
+.Values.rbac.namespaces — TokenReview is a non-namespaced API and the
+built-in ClusterRole cannot be referenced from a namespaced RoleBinding.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kagent.fullname" . }}-auth-delegator
+  labels:
+    {{- include "kagent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: {{ include "kagent.fullname" . }}-controller
+  namespace: {{ include "kagent.namespace" . }}

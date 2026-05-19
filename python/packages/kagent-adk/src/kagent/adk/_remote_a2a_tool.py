@@ -73,6 +73,12 @@ class _SubagentInterceptor(ClientCallInterceptor):
         headers[_SOURCE_HEADER] = _SOURCE_SUBAGENT
         if context and _USER_ID_CONTEXT_KEY in context.state:
             headers["x-user-id"] = context.state[_USER_ID_CONTEXT_KEY]
+        from kagent.adk.aauth import get_signer
+        signer = get_signer()
+        if signer and agent_card and agent_card.url:
+            await signer.ensure_fresh_jwt()
+            sig_headers = signer.sign(method="POST", url=agent_card.url, headers=headers)
+            headers.update(sig_headers)
         http_kwargs["headers"] = headers
         return request_payload, http_kwargs
 

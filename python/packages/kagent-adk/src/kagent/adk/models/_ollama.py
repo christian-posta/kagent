@@ -159,9 +159,11 @@ class KAgentOllamaLlm(KAgentTLSMixin, BaseLlm):
             "host": host,
             "headers": self.default_headers or {},
         }
-
         kwargs.update(self._tls_httpx_kwargs())
-
+        from kagent.adk.aauth import get_signer
+        signer = get_signer()
+        if signer:
+            kwargs["event_hooks"] = {"request": [signer.make_hook()]}
         return AsyncClient(**kwargs)
 
     @classmethod

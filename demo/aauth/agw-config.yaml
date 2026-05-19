@@ -1,0 +1,77 @@
+# AgentGateway configuration for kagent AAuth demo
+#
+# Binds on :3030 — inside the cluster, pods reach this as host.docker.internal:3030
+# All routes require AAuth HTTP Message Signatures (RFC 9421), verified by the
+# extauth-aauth-resource service on localhost:7070.
+#
+# Run:
+#   agentgateway -f demo/aauth/agw-config.yaml
+#
+# The agent pod must set the model's base_url to http://host.docker.internal:3030
+# (e.g. via ModelConfig.openai.base_url or the OPENAI_API_BASE env var).
+# The AAuth signer hook (AAUTH_ENABLED=true) signs every outbound request;
+# agentgateway then verifies the signature before forwarding upstream.
+
+binds:
+- port: 3030
+  listeners:
+  - routes:
+
+    # ── OpenAI pass-through ──────────────────────────────────────────────────
+    # Agents configured with base_url=http://host.docker.internal:3030 will
+    # reach this route. The /openai prefix is stripped before forwarding to
+    # the real OpenAI API so the path stays /v1/chat/completions etc.
+    - name: kagent-openai
+      matches:
+      - path:
+          pathPrefix: /openai
+      backends:
+      - ai:
+          name: openai
+          provider:
+            openAI:
+              model: gpt-4o-mini
+      policies:
+        urlRewrite:
+          path:
+            # Strip the /openai prefix so the forwarded path is /v1/...
+            prefix: ""
+        backendAuth:
+          key: ${OPENAI_API_KEY}
+        cors:
+          allowOrigins: ["*"]
+          allowHeaders: ["*"]
+          allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+          allowCredentials: false
+        extAuthz:
+          host: "localhost:7070"
+          protocol:
+            grpc:
+              context:
+                # Tells extauth which resource config to use (avoids host-based lookup).
+                aauth_resource_id: "kagent-agents"
+
+    # ── A2A agent-to-agent pass-through ─────────────────────────────────────
+    # When a kagent agent calls another agent through agentgateway, the request
+    # arrives at /a2a/<agent-name>. Adjust the backend URL to wherever your
+    # target agent is listening (e.g. port-forwarded service on localhost:8083).
+    #
+    # Uncomment and adjust when testing A2A calls:
+    #
+    # - name: kagent-a2a
+    #   matches:
+    #   - path:
+    #       pathPrefix: /a2a
+    #   backends:
+    #   - http:
+    #       url: http://localhost:8083
+    #   policies:
+    #     urlRewrite:
+    #       path:
+    #         prefix: ""   # strip /a2a prefix
+    #     extAuthz:
+    #       host: "localhost:7070"
+    #       protocol:
+    #         grpc:
+    #           context:
+    #             aauth_resource_id: "kagent-agents"
