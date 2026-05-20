@@ -5,6 +5,8 @@ This guide walks through testing the kagent AAuth integration end to end:
 ```
 kagent agent (Kind pod)
   └─ httpx event hook signs every outbound request (RFC 9421)
+  │   Signature-Key carries an aa-agent+jwt minted by the controller
+  │   and bound to the agent's ephemeral Ed25519 key via cnf.jwk
   │
   ▼
 agentgateway (host: localhost:3030)
@@ -13,38 +15,43 @@ agentgateway (host: localhost:3030)
   ▼
 extauth-aauth-resource (host: localhost:7070)
   └─ verifies HTTP message signature
-  │   - Phase 1 (hwk):  inline bare public key → level=pseudonymous
-  │   - Phase 2 (jwt):  aa-agent+jwt with cnf.jwk → level=identified
-  │                     JWT fetched at startup from controller's
-  │                     /aauth/agent-jwt endpoint (gated by a
-  │                     TokenReview of the agent pod's projected
-  │                     SA token), auto-refreshed before exp, and
-  │                     verified against the controller's
-  │                     /.well-known/jwks.json (key persisted in
-  │                     a Secret across restarts)
-  │   - Phase 3 (verify): same signatures are also observed by an
-  │                       in-process middleware on the controller's
-  │                       HTTP server AND on each agent's A2A
-  │                       endpoint. Log-only by default; flip
-  │                       AAUTH_VERIFY_MODE=enforce to reject.
+  │     The aa-agent+jwt is verified against the controller's
+  │     /.well-known/jwks.json (issuer key persisted in a Secret
+  │     across restarts). On success, identity level=identified.
+  │
+  │   In-cluster signed traffic (agent → controller, agent → agent)
+  │   is observed by additional middleware doors on the controller's
+  │   HTTP server AND on each agent's A2A endpoint. Log-only by
+  │   default; flip AAUTH_VERIFY_MODE=enforce to reject.
   ▼
 upstream (e.g. OpenAI api.openai.com)
 ```
 
-**Two phases, same wire test:**
+The agent generates an Ed25519 keypair at pod start, then fetches an
+`aa-agent+jwt` from the controller's `POST /aauth/agent-jwt` endpoint. The
+JWT binds the agent's signing public key (via `cnf.jwk`) to its kagent
+identity (`sub=aauth:<name>@<ns>.kagent.local`), signed by the controller's
+issuer key. The signer uses `sig_scheme="jwt"` and embeds the JWT in the
+`Signature-Key` header on every outbound request. The same Python signer
+hook is wired into every outbound httpx call site (controller client, A2A
+subagent calls, OpenAI / Anthropic / Ollama LLM clients).
 
+The controller's issuer key is generated on first start and stored in a
+Secret in the controller's namespace, so JWKS stays stable across
+controller restarts — agent JWTs minted before the restart remain
+verifiable afterward. The agent re-mints its JWT automatically as `exp`
+approaches (default refresh window: 5 min before expiry), so a long-running
+agent pod does not need a restart at the 24 h boundary.
 
-| Phase | Scheme | Identity                      | Controller-side work   | Agent signing key | Controller issuer key                     |
-| ----- | ------ | ----------------------------- | ---------------------- | ----------------- | ----------------------------------------- |
-| 1     | `hwk`  | pseudonymous (bare key)       | none                   | per pod restart   | n/a                                       |
-| 2     | `jwt`  | identified via `aa-agent+jwt` | issuer endpoint + JWKS | per pod restart   | persisted in Secret `kagent-aauth-issuer` |
-
-
-Phase 2 builds on Phase 1: the same Python signer hook is wired into every outbound httpx call site (controller client, A2A subagent calls, OpenAI / Anthropic / Ollama LLM clients). The difference is only in **what credential** rides in the `Signature-Key` header.
-
-The controller's issuer key is generated on first start and stored in a Secret in the controller's namespace, so JWKS stays stable across controller restarts — agent JWTs minted before the restart remain verifiable afterward. The agent re-mints its JWT automatically as `exp` approaches (default refresh window: 5 min before expiry), so a long-running agent pod does not need a restart at the 24 h boundary.
-
-`POST /aauth/agent-jwt` is gated by **Kubernetes TokenReview** of the agent pod's projected ServiceAccount token: the agent sends its SA token as a Bearer header on the mint request, the controller validates it against the kube-apiserver, and derives the canonical `sub` from the resulting `system:serviceaccount:<ns>:<name>` username. The body's `sub` is only a sanity check — it must match the derived value or the request is rejected. This means an agent identity cannot be impersonated by any other pod in the cluster; only the pod whose SA token corresponds to that identity can mint a JWT for it.
+`POST /aauth/agent-jwt` is gated by **Kubernetes TokenReview** of the agent
+pod's projected ServiceAccount token: the agent sends its SA token as a
+Bearer header on the mint request, the controller validates it against the
+kube-apiserver, and derives the canonical `sub` from the resulting
+`system:serviceaccount:<ns>:<name>` username. The body's `sub` is only a
+sanity check — it must match the derived value or the request is rejected.
+This means an agent identity cannot be impersonated by any other pod in the
+cluster; only the pod whose SA token corresponds to that identity can mint
+a JWT for it.
 
 ---
 
@@ -88,11 +95,11 @@ Three separate verifiers sit on different traffic boundaries in this setup. They
 ```
 
 
-| Door | Implementation                                                      | Verifies                                                                                                              | Why this verifier vs. another                                                                                                                                               |
-| ---- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | extauth-aauth-resource sidecar of agentgateway (outside kagent)     | Outbound traffic from agents to external APIs that don't speak AAuth                                                  | The upstream (OpenAI etc.) can't verify signatures itself — the proxy has to. extauth is one implementation; Envoy/Istio/etc. with a different ext_authz module also works. |
-| 2    | Phase 3 Go middleware in the controller's HTTP server               | Every request to `:8083/api/*`, including the `/api/a2a/<ns>/<name>` proxy that other agents and external clients use | The controller is AAuth-aware in-process; no external gateway needed. Replaces extauth at this boundary.                                                                    |
-| 3    | Phase 3 Python ASGI middleware in front of each agent's A2A handler | Every request that lands on the agent pod's `:8080`                                                                   | The agent pod is AAuth-aware in-process; no external gateway needed. Catches direct pod-to-pod traffic that bypasses the controller proxy.                                  |
+| Door | Implementation                                                  | Verifies                                                                                                              | Why this verifier vs. another                                                                                                                                               |
+| ---- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | extauth-aauth-resource sidecar of agentgateway (outside kagent) | Outbound traffic from agents to external APIs that don't speak AAuth                                                  | The upstream (OpenAI etc.) can't verify signatures itself — the proxy has to. extauth is one implementation; Envoy/Istio/etc. with a different ext_authz module also works. |
+| 2    | Go middleware in the controller's HTTP server                   | Every request to `:8083/api/*`, including the `/api/a2a/<ns>/<name>` proxy that other agents and external clients use | The controller is AAuth-aware in-process; no external gateway needed. Replaces extauth at this boundary.                                                                    |
+| 3    | Python ASGI middleware in front of each agent's A2A handler     | Every request that lands on the agent pod's `:8080`                                                                   | The agent pod is AAuth-aware in-process; no external gateway needed. Catches direct pod-to-pod traffic that bypasses the controller proxy.                                  |
 
 
 ### Which verifier sees which traffic
@@ -121,7 +128,7 @@ Three separate verifiers sit on different traffic boundaries in this setup. They
 ### Defaults today
 
 - **Door 1 (extauth):** enforces — unsigned traffic is rejected with the AAuth challenge (§C1).
-- **Doors 2 and 3 (Phase 3):** log-only by default. They run on every request, write a `aauth: verified caller=…` or `aauth: unverified reason=…` log line, and never reject. Flip with `AAUTH_VERIFY_MODE=enforce` to start gating. The intent is to watch the logs for a while and find unsigned traffic before you turn enforcement on.
+- **Doors 2 and 3 (in-process verifiers):** log-only by default. They run on every request, write a `aauth: verified caller=…` or `aauth: unverified reason=…` log line, and never reject. Flip with `AAUTH_VERIFY_MODE=enforce` to start gating. The intent is to watch the logs for a while and find unsigned traffic before you turn enforcement on.
 
 ---
 
@@ -154,7 +161,7 @@ helm upgrade kagent-crds helm/kagent-crds \
   --namespace kagent --kube-context kind-kagent --wait
 
 # Roll out the new controller + agent images, and turn ON the controller's
-# Phase 2 issuer by setting AAUTH_ISSUER_URL. http://localhost:8083 is the
+# AAuth issuer by setting AAUTH_ISSUER_URL. http://localhost:8083 is the
 # canonical issuer URL — extauth reaches it via the port-forward in Part B.
 helm upgrade kagent helm/kagent \
   --namespace kagent --kube-context kind-kagent \
@@ -181,7 +188,7 @@ go build -o aauth-service ./cmd/server
 
 ### A3. Generate the extauth resource signing key
 
-The Phase 2 demo does **not** require this key for signature verification (verification uses the agent's `cnf.jwk` and the controller's issuer JWKS), but extauth still wants the file to exist so it can sign resource-token challenges when extauth issues a 401.
+This key is **not** used for verifying the agent's request signature (that uses the agent's `cnf.jwk` plus the controller's issuer JWKS). extauth still needs the file to exist so it can sign resource-token challenges when it issues a 401.
 
 ```bash
 # From the kagent repo root:
@@ -249,7 +256,7 @@ AAUTH_CONTROLLER_URL=http://kagent-controller.kagent:8083
 AAUTH_SA_TOKEN_PATH=/var/run/secrets/kagent.dev/aauth/token
 ```
 
-The `AAUTH_CONTROLLER_URL` tells the signer to use Phase 2 (jwt). If it's missing, the signer falls back to Phase 1 (hwk) — still works, just at a lower identity level.
+The `AAUTH_CONTROLLER_URL` tells the signer where to mint its `aa-agent+jwt`. If it's missing, the signer can't get a credential and outbound signing will be disabled.
 
 The `AAUTH_SA_TOKEN_PATH` points at an **audience-scoped** projected ServiceAccount token (audience `kagent-controller`, separate from the default SA token). The controller's `TokenReview` enforces that audience, so a token leaked from this pod can't be replayed against any other service that calls TokenReview without an audience check.
 
@@ -369,7 +376,7 @@ curl -s -X POST http://localhost:18080/ \
             "kind":       "message",
             "messageId":  "msg-1",
             "role":       "user",
-            "parts":      [{"kind": "text", "text": "phase 2 hello"}]
+            "parts":      [{"kind": "text", "text": "hello from the aauth demo"}]
           }
         }
       }' | jq '.result.history[-1]'
@@ -400,8 +407,6 @@ The response depends on whether the `OPENAI_API_KEY` you exported when starting 
 
 In terminal 2 (extauth), the most recent log line will look like:
 
-**Phase 2 (jwt scheme):**
-
 ```json
 {
   "time":         "2026-05-12T02:52:30Z",
@@ -414,100 +419,80 @@ In terminal 2 (extauth), the most recent log line will look like:
 }
 ```
 
-**Phase 1 (hwk scheme — if you re-ran with Phase 1 config):**
+What this means:
 
-```json
-{
-  "resource_id": "kagent-agents",
-  "level":       "pseudonymous",
-  "result":      "allowed"
-}
-```
-
-The difference is the key thing:
-
-- `level=identified` means the controller's issuer signed an `aa-agent+jwt` that attests "this is `aauth:aauth-test-agent@kagent.kagent.local`". extauth fetched `/.well-known/jwks.json` from the controller, verified the JWT, then verified the request signature with the `cnf.jwk` public key embedded in the JWT.
-- `level=pseudonymous` means extauth saw only an inline public key with no provenance — it verified the signature, but the public key has no real-world identity attached.
-
----
-
-## Part D — Switching between Phase 1 and Phase 2
-
-The same demo can run in either phase by changing **two things**:
-
-1. `demo/aauth/aauth-config.yaml` — the `resources[0]` block.
-2. Whether `AAUTH_CONTROLLER_URL` is set on the agent pod (controlled by whether the controller has `AAUTH_ISSUER_URL` set, which the translator passes through to the agent).
-
-### To force Phase 1 (hwk only):
-
-In `demo/aauth/aauth-config.yaml`:
-
-```yaml
-allow_pseudonymous: true
-allowed_signature_key_schemes: [hwk]
-# remove or comment out agent_servers and allow_insecure_jwt_issuer
-```
-
-And clear the controller's issuer URL so the translator stops injecting `AAUTH_CONTROLLER_URL`:
-
-```bash
-helm upgrade kagent helm/kagent \
-  --namespace kagent --kube-context kind-kagent \
-  --reuse-values \
-  --set controller.aauth.issuerUrl="" \
-  --wait
-kubectl --context kind-kagent rollout restart deploy/aauth-test-agent -n kagent
-```
-
-Restart extauth; the next request will log `level=pseudonymous`.
-
-### To force Phase 2 (jwt only — default in the committed config):
-
-In `demo/aauth/aauth-config.yaml`:
-
-```yaml
-allow_pseudonymous: false
-allowed_signature_key_schemes: [jwt]
-allowed_jwt_types: [aa-agent+jwt]
-agent_servers:
-  - issuer:   "http://localhost:8083"
-    jwks_uri: "http://localhost:8083/.well-known/jwks.json"
-allow_insecure_jwt_issuer: true
-```
-
-Make sure `controller.aauth.issuerUrl=http://localhost:8083` is set on the controller (Step A1). After the agent pod restarts, its log should show:
-
-```
-AAuth: minted aa-agent+jwt — expires_in=86400
-AAuth signing enabled — agent_id=aauth:... scheme=jwt
-```
-
-If you instead see `scheme=hwk` in the log, the controller URL didn't propagate — see "Agent stuck on hwk" below.
+- `level=identified` — the controller's issuer signed an `aa-agent+jwt` that attests "this is `aauth:aauth-test-agent@kagent.kagent.local`". extauth fetched `/.well-known/jwks.json` from the controller, verified the JWT, then verified the request signature with the `cnf.jwk` public key embedded in the JWT.
+- `delegate` — the agent's `sub`, derived server-side from its SA token via TokenReview. No other pod can produce a JWT with this `sub`.
 
 ---
 
 ## Troubleshooting
 
-### Agent stuck on `scheme=hwk` when Phase 2 is configured
+### Agent didn't mint a JWT at startup
 
-The agent picks Phase 2 only if `AAUTH_CONTROLLER_URL` is set on the pod. The translator only injects it when the controller has `AAUTH_ISSUER_URL` set. Check both:
+The signer needs `AAUTH_CONTROLLER_URL` to be set on the agent pod. The
+translator injects it only when the controller has `AAUTH_ISSUER_URL` set.
+Check both:
 
 ```bash
-# Controller side:
-kubectl --context kind-kagent exec -n kagent deploy/kagent-controller -- env | grep AAUTH
-kubectl --context kind-kagent logs -n kagent deploy/kagent-controller | grep "AAuth issuer enabled"
-# Expect: "AAuth issuer enabled" with issuerURL=http://localhost:8083
+# Controller side (distroless image — no env/shell in the container):
+kubectl --context kind-kagent get deploy -n kagent kagent-controller \
+  -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}{"="}{.value}{"\n"}{end}' \
+  | grep '^AAUTH'
+# Expect: AAUTH_ISSUER_URL=http://localhost:8083 (when helm sets controller.aauth.issuerUrl)
 
-# Agent side:
+kubectl --context kind-kagent logs -n kagent deploy/kagent-controller \
+  | grep -E 'AAuth (issuer|verifier) enabled'
+# Expect issuerURL=http://localhost:8083 and mode=log (empty AAUTH_VERIFY_MODE → log)
+
+# Agent side (Python image has env):
 kubectl --context kind-kagent exec -n kagent deploy/aauth-test-agent -- env | grep AAUTH
 # Expect AAUTH_ENABLED, AAUTH_AGENT_ID, AND AAUTH_CONTROLLER_URL all set
 ```
 
-If the agent has `AAUTH_ENABLED` but no `AAUTH_CONTROLLER_URL`, the translator didn't pick it up — most likely because the agent pod predates the controller upgrade. Restart the agent:
+If the agent has `AAUTH_ENABLED` but no `AAUTH_CONTROLLER_URL`, the
+translator didn't pick it up — most likely because the agent pod predates
+the controller upgrade. Restart the agent and confirm the mint succeeds:
 
 ```bash
 kubectl --context kind-kagent rollout restart deploy/aauth-test-agent -n kagent
+kubectl --context kind-kagent logs -n kagent deploy/aauth-test-agent \
+  | grep -E "AAuth: minted|failed to fetch aa-agent\\+jwt"
+# Expect: "AAuth: minted aa-agent+jwt — expires_in=86400"
 ```
+
+If you see `failed to fetch aa-agent+jwt`, the mint endpoint rejected the
+request — see the next section.
+
+### Agent log shows `failed to fetch aa-agent+jwt`
+
+The controller's `POST /aauth/agent-jwt` endpoint requires a Kubernetes
+ServiceAccount Bearer token (validated via `TokenReview`). If the agent pod
+is missing its projected SA token, or the controller can't reach the
+kube-apiserver, the mint fails and the signer cannot operate.
+
+Check, in order:
+
+```bash
+# 1) The agent pod has its SA token mounted (default in standard pod specs).
+kubectl --context kind-kagent exec -n kagent deploy/aauth-test-agent -- \
+  ls -l /var/run/secrets/kubernetes.io/serviceaccount/token
+# Expect: a file present, non-zero size.
+
+# 2) The controller is allowed to call TokenReview.
+kubectl --context kind-kagent get clusterrolebinding kagent-auth-delegator
+# Expect: a ClusterRoleBinding to system:auth-delegator. If missing, helm
+# upgrade with the current chart will install it.
+
+# 3) The agent's request reached the controller and was rejected.
+kubectl --context kind-kagent logs -n kagent deploy/aauth-test-agent | grep -i aauth
+# Look for the failed fetch line — the response body will say why.
+```
+
+If the binding is missing, install the chart at the current revision. If
+the SA token is missing, your pod spec is non-standard — make sure
+`automountServiceAccountToken: false` is **not** set on the agent's pod
+template or ServiceAccount.
 
 ### Agent fetched the JWT but extauth still says `missing_signature`
 
@@ -535,30 +520,6 @@ If the Secret was deleted (manually, or by reinstalling the chart with `--force-
 ```bash
 kubectl --context kind-kagent rollout restart deploy/aauth-test-agent -n kagent
 ```
-
-### Agent log shows `falling back to hwk` after the upgrade
-
-The controller's `POST /aauth/agent-jwt` endpoint now requires a Kubernetes ServiceAccount Bearer token (validated via `TokenReview`). If the agent pod is missing its projected SA token, or the controller can't reach the kube-apiserver, the mint fails and the signer stays on hwk for the life of the process.
-
-Check, in order:
-
-```bash
-# 1) The agent pod has its SA token mounted (default in standard pod specs).
-kubectl --context kind-kagent exec -n kagent deploy/aauth-test-agent -- \
-  ls -l /var/run/secrets/kubernetes.io/serviceaccount/token
-# Expect: a file present, non-zero size.
-
-# 2) The controller is allowed to call TokenReview.
-kubectl --context kind-kagent get clusterrolebinding kagent-auth-delegator
-# Expect: a ClusterRoleBinding to system:auth-delegator. If missing, helm
-# upgrade with the current chart will install it.
-
-# 3) The agent's request reached the controller and was rejected.
-kubectl --context kind-kagent logs -n kagent deploy/aauth-test-agent | grep -i aauth
-# Look for the failed fetch line — the response body will say why.
-```
-
-If the binding is missing, install the chart at the current revision. If the SA token is missing, your pod spec is non-standard — make sure `automountServiceAccountToken: false` is **not** set on the agent's pod template or ServiceAccount.
 
 ### extauth says `expired_jwt`
 
@@ -610,11 +571,6 @@ You probably haven't built the UI image. The controller and agent images roll fi
 kubectl --context kind-kagent delete -f examples/aauth-test-agent.yaml
 kubectl --context kind-kagent delete modelconfig -n kagent aauth-model-config
 
-# To turn off the controller-side issuer (back to Phase 1 only):
-helm upgrade kagent helm/kagent \
-  --namespace kagent --kube-context kind-kagent \
-  --reuse-values --set controller.aauth.issuerUrl="" --wait
-
 # To remove the resource_key.pem (it's git-ignored, but explicit cleanup):
 rm demo/aauth/resource_key.pem
 ```
@@ -624,14 +580,14 @@ rm demo/aauth/resource_key.pem
 ## Files in this directory
 
 
-| File                                      | What it is                                                                                                                                                                                                                                                                                                                  |
-| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `agw-config.yaml`                         | agentgateway config — binds :3030, proxies `/openai/*` to api.openai.com, delegates to extauth on :7070, sets `aauth_resource_id: kagent-agents`.                                                                                                                                                                           |
-| `aauth-config.yaml`                       | extauth resource config — gRPC :7070, HTTP :8080, accepts `jwt` scheme, points at the controller's JWKS at `http://localhost:8083`.                                                                                                                                                                                         |
-| `resource_key.pem`                        | extauth's signing key for resource-token challenges. Generated locally, git-ignored.                                                                                                                                                                                                                                        |
-| `README.md`                               | This file.                                                                                                                                                                                                                                                                                                                  |
-| `FOLLOWUPS.md`                            | Spec-conformance gaps and demo cleanup items. Persistent issuer key, SA-TokenReview gate, audience-scoped SA token, JWT auto-refresh, and Phase 3 log-only verification are all DONE. Remaining: enforce-mode rollout plan, canonicalization quirks, key rotation, optional `jti`, and SDK coverage for Gemini/Bedrock/MCP. |
-| (repo root) `scripts/aauth-call-agent.py` | Debug helper for §E3. Mints a JWT against the controller using the calling pod's SA token, signs an A2A `message/send` request, posts it. Not shipped in the agent image.                                                                                                                                                   |
+| File                                      | What it is                                                                                                                                                                                                                                                                                                                     |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `agw-config.yaml`                         | agentgateway config — binds :3030, proxies `/openai/*` to api.openai.com, delegates to extauth on :7070, sets `aauth_resource_id: kagent-agents`.                                                                                                                                                                              |
+| `aauth-config.yaml`                       | extauth resource config — gRPC :7070, HTTP :8080, accepts `jwt` scheme, points at the controller's JWKS at `http://localhost:8083`.                                                                                                                                                                                            |
+| `resource_key.pem`                        | extauth's signing key for resource-token challenges. Generated locally, git-ignored.                                                                                                                                                                                                                                           |
+| `README.md`                               | This file.                                                                                                                                                                                                                                                                                                                     |
+| `FOLLOWUPS.md`                            | Spec-conformance gaps and demo cleanup items. Persistent issuer key, SA-TokenReview gate, audience-scoped SA token, JWT auto-refresh, and log-only in-cluster verification are all DONE. Remaining: enforce-mode rollout plan, canonicalization quirks, key rotation, optional `jti`, and SDK coverage for Gemini/Bedrock/MCP. |
+| (repo root) `scripts/aauth-call-agent.py` | Debug helper for §E3. Mints a JWT against the controller using the calling pod's SA token, signs an A2A `message/send` request, posts it. Not shipped in the agent image.                                                                                                                                                      |
 
 
 ## What this demo proves
@@ -653,7 +609,7 @@ When you see `level=identified` in extauth's log, the following has all happened
 
 If any of those steps had failed, you'd see `result=error` in the extauth log with a `reason=...` explaining which stage broke, and `LogAuthorityResolutionOnFailure` would dump every header it saw for forensics.
 
-## Part E — Phase 3 verification (log-only)
+## Part E — In-cluster verification (log-only)
 
 This part exercises **doors 2 and 3** from the [topology section](#where-each-verifier-lives-and-what-it-covers) — the in-cluster verifiers that observe signed traffic between kagent components without needing extauth or any external gateway.
 
@@ -893,11 +849,11 @@ kubectl --context kind-kagent port-forward -n kagent svc/aauth-test-agent 18080:
 Now run the verification recipe. It does three things in one shot:
 
 1. Records a timestamp before the curl so the log filter sees only this
-   request's entries (the controller logs `/mcp` traffic from other agents
+  request's entries (the controller logs `/mcp` traffic from other agents
    and clients constantly — without `--since-time` you can't tell yours
    from theirs).
 2. Sends a prompt strong enough to force the LLM to actually call
-   `list_agents` rather than answer from memory.
+  `list_agents` rather than answer from memory.
 3. Filters the controller log to only your `path=/mcp` lines and pretty-prints them.
 
 > **Note.** The proof here is the **controller's verifier log**, not the
@@ -944,9 +900,9 @@ agent pod authenticated itself to the controller on every leg.
 A few things that can make the output look different:
 
 - **MCP sessions are reused.** A second curl against the same agent pod
-  may produce only 1–2 lines (just the tool call itself) because the
-  session opened by the first curl is still alive. Restart the agent pod
-  to force a clean session:
+may produce only 1–2 lines (just the tool call itself) because the
+session opened by the first curl is still alive. Restart the agent pod
+to force a clean session:
   ```bash
   kubectl --context kind-kagent rollout restart -n kagent deploy/aauth-test-agent
   kubectl --context kind-kagent rollout status  -n kagent deploy/aauth-test-agent
@@ -956,7 +912,7 @@ A few things that can make the output look different:
   ```
 - **You see only `unverified … missing_signature` entries from `remote_addr=10.244.0.1`.** That's not your agent — `10.244.0.1` is the kind node bridge gateway (external traffic NAT'd into the cluster), typically the kagent UI or a port-forwarded curl hitting the controller's `/mcp` directly. The agent pod itself shows up with its pod IP (e.g. `10.244.0.71`). The recipe's `caller` field filter ignores these. If you've lost your port-forward or it's pointing at a dead pod sandbox, the agent's MCP calls never happen and you'll only see this background noise — fix the port-forward and retry.
 - **Zero lines.** The LLM answered from memory without calling the tool. Strengthen the prompt ("the only way to answer is to call the list_agents tool — if you skip the tool call, your answer is wrong") and retry, or rollout-restart the agent to clear any session/response cache.
-- **`unverified reason="invalid_signature"` on `/mcp` from your agent.** The signer is running but the verifier can't fetch JWKS — usually the authority-rewrite issue. Re-check `AAUTH_VERIFY_ISSUER_REWRITE` (§B2).
+- `**unverified reason="invalid_signature"` on `/mcp` from your agent.** The signer is running but the verifier can't fetch JWKS — usually the authority-rewrite issue. Re-check `AAUTH_VERIFY_ISSUER_REWRITE` (§B2).
 
 ### F3. Inspect the JWT the controller issued to the agent
 
@@ -1001,15 +957,17 @@ here):
 
 What every field means, mapped to the AAuth draft:
 
-| Field          | Spec source            | What it means here                                                                                                                       |
-| -------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `typ`          | §535                   | `aa-agent+jwt` — agent token type. Distinguishes from PS tokens, etc.                                                                    |
-| `alg` + `kid`  | JWS header             | The controller signs with `EdDSA` using key id `kagent-issuer-1` (matches the kid in its JWKS).                                          |
-| `iss`          | §535 (required claim)  | The controller's canonical URL. Verifiers fetch `<iss>/.well-known/<dwk>` to discover the JWKS.                                          |
-| `sub`          | §535                   | The agent's identity. Derived **server-side** from the SA token via TokenReview — the body's `sub` is only a sanity-check.               |
-| `cnf.jwk`      | §535, RFC 7800         | Proof-of-possession key — the Ed25519 public key the agent generated in-process. The HTTP signature is made with the matching private key, never leaves the pod. |
-| `dwk`          | §548                   | `aauth-agent.json` — tells verifiers which well-known file to fetch from `iss` to find the JWKS.                                         |
-| `iat`, `exp`   | RFC 7519               | Mint and expiry (24h TTL by default). The signer auto-refreshes within 5 min of `exp`.                                                   |
+
+| Field         | Spec source           | What it means here                                                                                                                                               |
+| ------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `typ`         | §535                  | `aa-agent+jwt` — agent token type. Distinguishes from PS tokens, etc.                                                                                            |
+| `alg` + `kid` | JWS header            | The controller signs with `EdDSA` using key id `kagent-issuer-1` (matches the kid in its JWKS).                                                                  |
+| `iss`         | §535 (required claim) | The controller's canonical URL. Verifiers fetch `<iss>/.well-known/<dwk>` to discover the JWKS.                                                                  |
+| `sub`         | §535                  | The agent's identity. Derived **server-side** from the SA token via TokenReview — the body's `sub` is only a sanity-check.                                       |
+| `cnf.jwk`     | §535, RFC 7800        | Proof-of-possession key — the Ed25519 public key the agent generated in-process. The HTTP signature is made with the matching private key, never leaves the pod. |
+| `dwk`         | §548                  | `aauth-agent.json` — tells verifiers which well-known file to fetch from `iss` to find the JWKS.                                                                 |
+| `iat`, `exp`  | RFC 7519              | Mint and expiry (24h TTL by default). The signer auto-refreshes within 5 min of `exp`.                                                                           |
+
 
 > The token's signature (3rd dotted segment) is **the controller's
 > signature over header+claims**, not the agent's. The agent's identity is
@@ -1038,7 +996,7 @@ decode_jwt_segment 0   # header
 decode_jwt_segment 1   # claims
 ```
 
-Or paste the token into <https://jwt.io>.
+Or paste the token into [https://jwt.io](https://jwt.io).
 
 ### F4. Negative test: turn signing off and re-run
 
@@ -1110,8 +1068,7 @@ controller HTTP router                                      │
 
 No extauth, no agentgateway, no Envoy in the path. The only AAuth-aware
 component besides the controller is the agent pod itself, and the only
-shared trust root is the controller's JWKS (which both sides already use
-for Phase 2).
+shared trust root is the controller's JWKS.
 
 Limitations (tracked in `FOLLOWUPS.md`):
 

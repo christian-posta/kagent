@@ -99,17 +99,17 @@ mis-configured controller URL. Add a one-line note in §B2.
 
 ### 10. Body content-digest not signed
 
-Phase 1/2 deliberately skip RFC 9530 `content-digest` to sidestep streaming
+The signer deliberately skips RFC 9530 `content-digest` to sidestep streaming
 LLM responses. Spec §2098 lets resources require additional components via
 the `additional_signature_components` metadata field. If the resource ever
 opts in, the Python signer needs to capture the body — which means draining
 the httpx request stream first. Track separately from this demo.
 
-## Phase 3 follow-ups (verification middleware shipped log-only)
+## In-cluster verification follow-ups (middleware shipped log-only)
 
-The current Phase 3 cut installs the Go middleware on the controller HTTP
-server and the Python ASGI middleware in front of every agent's A2A
-endpoint. Both run in `log` mode by default. Remaining work:
+The current cut installs the Go middleware on the controller HTTP server
+and the Python ASGI middleware in front of every agent's A2A endpoint.
+Both run in `log` mode by default. Remaining work:
 
 - **Enforce-mode rollout plan.** `AAUTH_VERIFY_MODE=enforce` is implemented
   on both sides; flipping it cluster-wide before all traffic is signed
