@@ -1,8 +1,10 @@
 # extauth-aauth-resource configuration for kagent AAuth demo
 #
 # Protects all traffic that passes through agentgateway (see agw-config.yaml).
-# Accepts requests signed with the hwk (bare-key) scheme — this is what kagent
-# agents produce when AAUTH_ENABLED=true (Phase 1 ephemeral Ed25519 keypair).
+# Accepts requests signed with the `jwt` scheme — kagent agents present an
+# aa-agent+jwt minted by the controller and embed it in the Signature-Key
+# header. The JWT binds the agent's ephemeral signing key (cnf.jwk) to its
+# kagent identity (sub=aauth:<name>@<ns>.kagent.local).
 #
 # Run from the extauth-aauth-resource repo root:
 #   AAUTH_CONFIG=/path/to/kagent/demo/aauth/aauth-config.yaml ./aauth-service
@@ -56,10 +58,8 @@ resources:
     # How long a received HTTP Message Signature is valid.
     signature_window: 60s
 
-    # ── jwt (identified) scheme — Phase 2 ─────────────────────────────────────
-    # Agents present an aa-agent+jwt issued by the kagent controller. The JWT
-    # binds the agent's signing public key (cnf.jwk) to its kagent identity
-    # (sub=aauth:<name>@<ns>.kagent.local). Identity level will be "identified".
+    # Reject requests that present only a bare public key (hwk scheme). We
+    # require every caller to bring a controller-issued aa-agent+jwt.
     allow_pseudonymous: false
 
     # Strip the AAuth signature headers before forwarding to the upstream backend.
@@ -78,7 +78,7 @@ resources:
     #
     # authority_override: "host.docker.internal:3030"
 
-    # Access mode: identity = hwk/pseudonymous is sufficient to allow the request.
+    # Access mode: a verified caller identity is sufficient to allow the request.
     access:
       require: identity
 
