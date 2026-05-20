@@ -29,4 +29,13 @@ def get_signer() -> AAuthSigner | None:
     return _signer
 
 
-__all__ = ["AAuthSigner", "init_signer", "get_signer"]
+# Imported after get_signer is defined to avoid circular import — the
+# factory wrapper closes over get_signer at call time.
+from ._mcp_factory import wrap_mcp_httpx_factory  # noqa: E402
+
+__all__ = [
+    "AAuthSigner",
+    "init_signer",
+    "get_signer",
+    "wrap_mcp_httpx_factory",
+]

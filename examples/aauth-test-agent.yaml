@@ -1,4 +1,20 @@
 ---
+# RemoteMCPServer that points at the controller's built-in MCP endpoint.
+# Used by the aauth-test-agent below to exercise the agent → /mcp signing
+# path (demo/aauth/README.md §F). The agent's MCP toolset wraps its
+# httpx_client_factory with the AAuth signer when AAUTH_ENABLED=true, so
+# every call to /mcp is RFC 9421 signed and verified by door 2 on the
+# controller HTTP server.
+apiVersion: kagent.dev/v1alpha2
+kind: RemoteMCPServer
+metadata:
+  name: kagent-builtin-mcp
+  namespace: kagent
+spec:
+  description: kagent's built-in MCP server (list_agents, invoke_agent)
+  protocol: STREAMABLE_HTTP
+  url: http://kagent-controller.kagent:8083/mcp
+---
 # Sample Agent with AAuth signing enabled.
 # Deploy this to test AAuth headers end-to-end through agentgateway.
 #
@@ -22,9 +38,19 @@ spec:
     modelConfig: aauth-model-config
     systemMessage: |
       You are a test agent used to verify AAuth HTTP Message Signatures.
-      Just respond briefly to whatever is asked.
+      When the user asks about agents in the cluster, USE the list_agents
+      tool (do not answer from memory). For everything else, respond briefly.
     aauth:
       enabled: true
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: kagent-builtin-mcp
+          kind: RemoteMCPServer
+          apiGroup: kagent.dev
+          toolNames:
+            - list_agents
+            - invoke_agent
     a2aConfig:
       skills:
       - id: aauth-test

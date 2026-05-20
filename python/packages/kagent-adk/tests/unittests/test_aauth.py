@@ -187,7 +187,7 @@ class TestSATokenBearer:
         mock_lib = _make_mock_aauth_lib()
         with patch("kagent.adk.aauth._signer._AAUTH_AVAILABLE", True), \
              patch("kagent.adk.aauth._signer._aauth_lib", mock_lib), \
-             patch("kagent.adk.aauth._signer._SA_TOKEN_PATH", str(token_file)), \
+             patch("kagent.adk.aauth._signer._DEFAULT_SA_TOKEN_PATH", str(token_file)), \
              patch("httpx.Client") as fake_client_cls:
             ctx = fake_client_cls.return_value.__enter__.return_value
             ctx.post.return_value.json.return_value = {"token": "tok-1", "expires_in": 86400}
@@ -202,6 +202,33 @@ class TestSATokenBearer:
             call_kwargs = ctx.post.call_args.kwargs
             assert call_kwargs["headers"]["Authorization"] == "Bearer fake.sa.token"
 
+    def test_env_override_path_wins_over_default(self, tmp_path):
+        """AAUTH_SA_TOKEN_PATH must point the signer at the audience-scoped
+        token (mounted by the kagent controller) rather than the default
+        SA token mount."""
+        env_path = tmp_path / "aauth-token"
+        env_path.write_text("audience-scoped-token")
+        default_path = tmp_path / "default-token"
+        default_path.write_text("wrong-token")
+
+        mock_lib = _make_mock_aauth_lib()
+        with patch.dict(os.environ, {"AAUTH_SA_TOKEN_PATH": str(env_path)}), \
+             patch("kagent.adk.aauth._signer._AAUTH_AVAILABLE", True), \
+             patch("kagent.adk.aauth._signer._aauth_lib", mock_lib), \
+             patch("kagent.adk.aauth._signer._DEFAULT_SA_TOKEN_PATH", str(default_path)), \
+             patch("httpx.Client") as fake_client_cls:
+            ctx = fake_client_cls.return_value.__enter__.return_value
+            ctx.post.return_value.json.return_value = {"token": "tok-1", "expires_in": 86400}
+            ctx.post.return_value.raise_for_status.return_value = None
+
+            from kagent.adk.aauth._signer import AAuthSigner
+            AAuthSigner(
+                agent_id="aauth:test@default.kagent.local",
+                controller_url="http://ctl.kagent:8083",
+            )
+            call_kwargs = ctx.post.call_args.kwargs
+            assert call_kwargs["headers"]["Authorization"] == "Bearer audience-scoped-token"
+
     def test_no_authorization_header_when_sa_token_missing(self, tmp_path):
         """Outside a pod (no SA token file), the mint still goes out but
         without an Authorization header — the controller will reject it."""
@@ -209,7 +236,7 @@ class TestSATokenBearer:
         mock_lib = _make_mock_aauth_lib()
         with patch("kagent.adk.aauth._signer._AAUTH_AVAILABLE", True), \
              patch("kagent.adk.aauth._signer._aauth_lib", mock_lib), \
-             patch("kagent.adk.aauth._signer._SA_TOKEN_PATH", str(missing)), \
+             patch("kagent.adk.aauth._signer._DEFAULT_SA_TOKEN_PATH", str(missing)), \
              patch("httpx.Client") as fake_client_cls:
             ctx = fake_client_cls.return_value.__enter__.return_value
             # Simulate a 401 response so the signer falls back to hwk.
@@ -363,6 +390,69 @@ class TestGlobalSingleton:
 # A2A interceptor integration
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Inbound verification (Phase 3) — _parse_mode + from_env gating
+# ---------------------------------------------------------------------------
+
+class TestInboundVerifier:
+    def test_parse_mode_defaults_and_aliases(self):
+        from kagent.adk.aauth._verifier import _parse_mode
+        assert _parse_mode(None) == "log"
+        assert _parse_mode("") == "log"
+        assert _parse_mode("log") == "log"
+        assert _parse_mode("observe") == "log"
+        assert _parse_mode("ENFORCE") == "enforce"
+        assert _parse_mode("strict") == "enforce"
+        assert _parse_mode("off") == "off"
+        assert _parse_mode("disabled") == "off"
+        assert _parse_mode("garbage") == "log"
+
+    def test_from_env_disabled_when_aauth_off(self):
+        from kagent.adk.aauth._verifier import AAuthVerifier
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AAUTH_ENABLED", None)
+            assert AAuthVerifier.from_env() is None
+
+    def test_from_env_disabled_when_no_controller_url(self):
+        from kagent.adk.aauth._verifier import AAuthVerifier
+        with patch.dict(os.environ, {"AAUTH_ENABLED": "true", "AAUTH_CONTROLLER_URL": ""}, clear=False):
+            assert AAuthVerifier.from_env() is None
+
+    def test_from_env_disabled_when_mode_off(self):
+        from kagent.adk.aauth._verifier import AAuthVerifier
+        with patch.dict(os.environ, {
+            "AAUTH_ENABLED": "true",
+            "AAUTH_CONTROLLER_URL": "http://ctl.kagent:8083",
+            "AAUTH_VERIFY_MODE": "off",
+        }, clear=False):
+            assert AAuthVerifier.from_env() is None
+
+    def test_from_env_returns_log_mode_by_default(self):
+        from kagent.adk.aauth._verifier import AAuthVerifier
+        with patch.dict(os.environ, {
+            "AAUTH_ENABLED": "true",
+            "AAUTH_CONTROLLER_URL": "http://ctl.kagent:8083",
+        }, clear=False):
+            os.environ.pop("AAUTH_VERIFY_MODE", None)
+            v = AAuthVerifier.from_env()
+            assert v is not None
+            assert v.mode == "log"
+
+    def test_canonical_authorities_includes_in_cluster_dns_and_extras(self):
+        from kagent.adk.aauth._verifier import _canonical_authorities
+        with patch.dict(os.environ, {
+            "KAGENT_NAME": "aauth-test-agent",
+            "KAGENT_NAMESPACE": "kagent",
+            "AAUTH_VERIFY_AUTHORITIES": "localhost:18080, custom.example:9999",
+        }, clear=False):
+            auths = _canonical_authorities()
+            assert "aauth-test-agent.kagent.svc.cluster.local:8080" in auths
+            assert "aauth-test-agent.kagent:8080" in auths
+            assert "localhost:8080" in auths
+            assert "localhost:18080" in auths
+            assert "custom.example:9999" in auths
+
+
 class TestSubagentInterceptorAAuth:
     @pytest.mark.asyncio
     async def test_intercept_adds_signature_headers_when_enabled(self):
@@ -405,3 +495,156 @@ class TestSubagentInterceptorAAuth:
 
         for h in ("Signature", "Signature-Input", "Signature-Key"):
             assert h not in http_kwargs.get("headers", {})
+
+
+# ---------------------------------------------------------------------------
+# MCP httpx_client_factory wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestMcpFactoryWrap:
+    """wrap_mcp_httpx_factory must passthrough when AAuth is disabled and
+    attach the signer's request hook when it's enabled."""
+
+    def _base_factory(self) -> Any:
+        """A factory that mirrors mcp.shared._httpx_utils.create_mcp_http_client."""
+
+        def factory(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
+            kwargs: dict[str, Any] = {"follow_redirects": True}
+            if headers is not None:
+                kwargs["headers"] = headers
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            if auth is not None:
+                kwargs["auth"] = auth
+            return httpx.AsyncClient(**kwargs)
+
+        return factory
+
+    def test_wrap_passthrough_when_signer_disabled(self):
+        import kagent.adk.aauth as aauth_module
+        from kagent.adk.aauth import wrap_mcp_httpx_factory
+
+        aauth_module._signer = None
+
+        wrapped = wrap_mcp_httpx_factory(self._base_factory())
+        client = wrapped()
+        try:
+            assert client.event_hooks.get("request", []) == []
+        finally:
+            # Defensive — httpx.AsyncClient is fine to leave for GC, but we
+            # close synchronously by reaching into the transport if needed.
+            pass
+
+    def test_wrap_attaches_signer_hook_when_enabled(self):
+        import kagent.adk.aauth as aauth_module
+        from kagent.adk.aauth import wrap_mcp_httpx_factory
+
+        sentinel_hook = MagicMock(name="signer_hook")
+        fake_signer = MagicMock(name="signer")
+        fake_signer.make_hook.return_value = sentinel_hook
+
+        aauth_module._signer = fake_signer
+        try:
+            wrapped = wrap_mcp_httpx_factory(self._base_factory())
+            client = wrapped()
+            request_hooks = client.event_hooks.get("request", [])
+            assert sentinel_hook in request_hooks
+            fake_signer.make_hook.assert_called_once()
+        finally:
+            aauth_module._signer = None
+
+    def test_wrap_preserves_existing_request_hooks(self):
+        """If the base factory returned a client that already had hooks,
+        the wrapper must append rather than clobber."""
+        import kagent.adk.aauth as aauth_module
+        from kagent.adk.aauth import wrap_mcp_httpx_factory
+
+        async def existing_hook(request: httpx.Request) -> None:  # pragma: no cover
+            return None
+
+        def base_factory(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
+            return httpx.AsyncClient(event_hooks={"request": [existing_hook]})
+
+        sentinel_hook = MagicMock(name="signer_hook")
+        fake_signer = MagicMock(name="signer")
+        fake_signer.make_hook.return_value = sentinel_hook
+        aauth_module._signer = fake_signer
+        try:
+            client = wrap_mcp_httpx_factory(base_factory)()
+            hooks = client.event_hooks.get("request", [])
+            assert existing_hook in hooks
+            assert sentinel_hook in hooks
+        finally:
+            aauth_module._signer = None
+
+    def test_kagent_mcp_toolset_swaps_factory_on_init(self):
+        """KAgentMcpToolset.__init__ must wrap params.httpx_client_factory."""
+        from google.adk.tools.mcp_tool import StreamableHTTPConnectionParams
+
+        from kagent.adk._mcp_toolset import KAgentMcpToolset
+
+        original_factory = MagicMock(name="original_factory")
+        params = StreamableHTTPConnectionParams(
+            url="http://example.local/mcp",
+            httpx_client_factory=original_factory,
+        )
+
+        toolset = KAgentMcpToolset(connection_params=params)
+        assert toolset._connection_params.httpx_client_factory is not original_factory
+        # Wrapper is callable (we just constructed it).
+        assert callable(toolset._connection_params.httpx_client_factory)
+
+    def test_decode_jwt_unsafe_roundtrips_header_and_claims(self):
+        """The mint-time logger uses an unsigned decoder. Verify it pulls
+        the two interesting maps out of a real-shaped JWT."""
+        import base64
+        import json as _json
+
+        from kagent.adk.aauth._signer import _decode_jwt_unsafe
+
+        header = {"alg": "EdDSA", "kid": "kagent-issuer-1", "typ": "aa-agent+jwt"}
+        claims = {
+            "iss": "http://localhost:8083",
+            "sub": "aauth:my-agent@ns.kagent.local",
+            "iat": 1700000000,
+            "exp": 1700086400,
+            "cnf": {"jwk": {"kty": "OKP", "crv": "Ed25519", "x": "abc"}},
+        }
+
+        def _b64(d: dict) -> str:
+            raw = _json.dumps(d, separators=(",", ":")).encode()
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+        token = f"{_b64(header)}.{_b64(claims)}.signature-placeholder"
+        got_header, got_claims = _decode_jwt_unsafe(token)
+        assert got_header == header
+        assert got_claims == claims
+
+    def test_decode_jwt_unsafe_returns_none_for_garbage(self):
+        from kagent.adk.aauth._signer import _decode_jwt_unsafe
+
+        assert _decode_jwt_unsafe("not-a-jwt") == (None, None)
+        assert _decode_jwt_unsafe("only.two") == (None, None)
+        assert _decode_jwt_unsafe("a.b.c") == (None, None)  # not valid base64/JSON
+
+    def test_kagent_mcp_toolset_wrap_is_noop_when_signer_disabled(self):
+        """When AAuth is off, the wrapped factory should produce a client
+        with no extra request hooks beyond what the base factory adds."""
+        import kagent.adk.aauth as aauth_module
+        from google.adk.tools.mcp_tool import StreamableHTTPConnectionParams
+
+        from kagent.adk._mcp_toolset import KAgentMcpToolset
+
+        aauth_module._signer = None
+
+        def base(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
+            return httpx.AsyncClient()
+
+        params = StreamableHTTPConnectionParams(
+            url="http://example.local/mcp",
+            httpx_client_factory=base,
+        )
+        toolset = KAgentMcpToolset(connection_params=params)
+        client = toolset._connection_params.httpx_client_factory()
+        assert client.event_hooks.get("request", []) == []

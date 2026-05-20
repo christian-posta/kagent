@@ -170,6 +170,14 @@ class KAgentApp:
 
         app = FastAPI(lifespan=lifespan_manager)
 
+        # AAuth Phase 3: install inbound signature verification middleware
+        # *before* the route handlers are added so the @app.middleware
+        # decorator captures them at registration. Off-by-default; honors
+        # AAUTH_VERIFY_MODE.
+        if not local:
+            from kagent.adk.aauth._verifier import install_middleware as _aauth_install_verify
+            _aauth_install_verify(app)
+
         # Health check/readiness probe
         app.add_route("/health", methods=["GET"], route=health_check)
         app.add_route("/thread_dump", methods=["GET"], route=thread_dump)

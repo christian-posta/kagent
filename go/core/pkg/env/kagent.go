@@ -89,4 +89,23 @@ var (
 			"the hwk (pseudonymous) signature scheme. Phase 2.",
 		ComponentAgentRuntime,
 	)
+
+	AAuthSATokenPath = RegisterStringVar(
+		"AAUTH_SA_TOKEN_PATH",
+		"",
+		"Filesystem path of the audience-scoped ServiceAccount token the agent sends as a "+
+			"Bearer credential when calling the controller's /aauth/agent-jwt mint endpoint. "+
+			"When set, the AAuth signer reads this file; otherwise it falls back to the "+
+			"default SA token mount (/var/run/secrets/kubernetes.io/serviceaccount/token).",
+		ComponentAgentRuntime,
+	)
+
+	AAuthVerifyIssuerRewrite = RegisterStringVar(
+		"AAUTH_VERIFY_ISSUER_REWRITE",
+		"",
+		"Comma-separated canonical-iss=in-cluster-URL pairs used by the agent's inbound "+
+			"verifier to fetch JWKS for issuers whose canonical URL isn't reachable from "+
+			"inside the cluster. Example: http://localhost:8083=http://kagent-controller.kagent:8083",
+		ComponentAgentRuntime,
+	)
 )
