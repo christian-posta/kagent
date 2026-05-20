@@ -126,7 +126,35 @@ class KAgentMcpToolset(McpToolset):
 
     This is particularly useful for explicitly catching and enriching failures that the base
     implementation may not catch and propagate without enough context.
+
+    Also wraps the connection params' ``httpx_client_factory`` so outbound
+    MCP HTTP calls carry AAuth signatures when ``AAUTH_ENABLED=true``.
     """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._maybe_wrap_aauth_factory()
+
+    def _maybe_wrap_aauth_factory(self) -> None:
+        """Swap the connection params' httpx_client_factory for an AAuth-signing variant.
+
+        Silently no-ops on stdio params (no httpx involved) or if the
+        attribute isn't present (e.g., a future params type that drops it).
+        The wrapper itself is a passthrough when AAuth is disabled, so it
+        is always safe to install.
+        """
+        params = getattr(self, "_connection_params", None)
+        if params is None:
+            return
+        base = getattr(params, "httpx_client_factory", None)
+        if base is None:
+            return
+        try:
+            from kagent.adk.aauth import wrap_mcp_httpx_factory
+
+            params.httpx_client_factory = wrap_mcp_httpx_factory(base)
+        except Exception:  # noqa: BLE001 — best-effort, never break toolset init
+            logger.exception("AAuth: failed to wrap MCP httpx_client_factory")
 
     async def get_tools(self, readonly_context: Optional[ReadonlyContext] = None) -> list[BaseTool]:
         try:

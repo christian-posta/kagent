@@ -87,6 +87,10 @@ type ServerConfig struct {
 	// POST /aauth/agent-jwt and returns the canonical agent identifier.
 	// Required when AAuthIssuer is set.
 	AAuthSubjectAuthenticator aauth.SubjectAuthenticator
+	// AAuthVerifier runs AAuth HTTP Message Signature verification on
+	// inbound API requests. nil disables verification (legacy behavior).
+	// Phase 3.
+	AAuthVerifier *aauth.Verifier
 }
 
 // HTTPServer is the structure that manages the HTTP server
@@ -354,6 +358,13 @@ func (s *HTTPServer) setupRoutes() {
 	// Use middleware for common functionality (first registered runs outermost on incoming requests).
 	s.router.Use(wsSandboxSSHAuthQueryMiddleware)
 	s.router.Use(auth.AuthnMiddleware(s.authenticator))
+	// AAuth verification runs after the existing AuthnMiddleware so we know
+	// the request has cleared the standard bearer-token check first. In
+	// log-only mode it never rejects; it just logs and stashes the verified
+	// Identity on the request context for downstream policy.
+	if s.config.AAuthVerifier != nil {
+		s.router.Use(s.config.AAuthVerifier.Middleware())
+	}
 	s.router.Use(contentTypeMiddleware)
 	s.router.Use(loggingMiddleware)
 	s.router.Use(errorHandlerMiddleware)

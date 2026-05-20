@@ -105,6 +105,32 @@ the `additional_signature_components` metadata field. If the resource ever
 opts in, the Python signer needs to capture the body — which means draining
 the httpx request stream first. Track separately from this demo.
 
+## Phase 3 follow-ups (verification middleware shipped log-only)
+
+The current Phase 3 cut installs the Go middleware on the controller HTTP
+server and the Python ASGI middleware in front of every agent's A2A
+endpoint. Both run in `log` mode by default. Remaining work:
+
+- **Enforce-mode rollout plan.** `AAUTH_VERIFY_MODE=enforce` is implemented
+  on both sides; flipping it cluster-wide before all traffic is signed
+  will reject things. Need a per-route or per-agent opt-in switch.
+- **RFC 9421 canonicalization quirks.** Some controller routes log
+  `invalid_signature` even though they should verify — paths with long
+  query strings (`/api/sessions/<id>?user_id=...&order=asc&limit=-1`) and
+  the event-stream POSTs. Investigate whether the agent's signer and the
+  Go verifier reconstruct `@path` identically; may need to canonicalize
+  query-string handling.
+- **Helper script `scripts/aauth-call-agent.py`** is a debug utility, not
+  a runtime feature. Don't ship it in the agent image — keep it next to
+  the README.
+- **Verifier metrics / counters.** Right now we only log; surface
+  `aauth_verifier_total{result="verified|unverified",mode=...}` Prometheus
+  metrics on the controller HTTP server.
+- **Authority list curation.** The Python verifier accepts a default set
+  of in-cluster authorities plus an env-var allowlist. For a real
+  multi-cluster deployment, this needs to come from CRD config rather
+  than environment variables.
+
 ## Out of scope for kagent (upstream work)
 
 These call sites can't be signed today because the underlying SDK doesn't

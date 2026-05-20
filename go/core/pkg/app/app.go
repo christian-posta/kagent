@@ -865,8 +865,9 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 	// controller restarts (otherwise every restart would invalidate every
 	// outstanding aa-agent+jwt).
 	var (
-		aauthIssuer  *aauth.Issuer
-		aauthSubject aauth.SubjectAuthenticator
+		aauthIssuer   *aauth.Issuer
+		aauthSubject  aauth.SubjectAuthenticator
+		aauthVerifier *aauth.Verifier
 	)
 	if issURL := os.Getenv("AAUTH_ISSUER_URL"); issURL != "" {
 		priv, pub, kid, err := aauth.LoadOrGenerateIssuerKey(ctx, mgr.GetConfig(), kagentNamespace, aauth.IssuerSecretName)
@@ -887,8 +888,26 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 			setupLog.Error(err, "unable to build kubernetes clientset for AAuth TokenReview")
 			os.Exit(1)
 		}
-		aauthSubject = &aauth.K8sSubjectAuthenticator{Client: k8sClient}
+		// Require the audience the agent's projected SA token is minted with.
+		// Tokens with the default audience (e.g. leaked from /var/run/secrets)
+		// will fail TokenReview and the mint request will be rejected with 403.
+		aauthSubject = &aauth.K8sSubjectAuthenticator{
+			Client:    k8sClient,
+			Audiences: []string{"kagent-controller"},
+		}
 		setupLog.Info("AAuth issuer enabled", "issuerURL", issURL, "kid", kid, "secret", kagentNamespace+"/"+aauth.IssuerSecretName)
+
+		// Phase 3: install the AAuth verification middleware on the controller's
+		// HTTP server. Default mode is log-only so a misconfiguration won't 401
+		// existing traffic; set AAUTH_VERIFY_MODE=enforce to gate.
+		verifyMode := aauth.ParseVerifyMode(os.Getenv("AAUTH_VERIFY_MODE"))
+		aauthVerifier, err = aauth.NewLocalVerifier(aauthIssuer, verifyMode)
+		if err != nil {
+			setupLog.Error(err, "unable to create AAuth verifier")
+			os.Exit(1)
+		}
+		aauthVerifier.Logger = aauth.LogrAdapter{Logger: ctrl.Log.WithName("aauth")}
+		setupLog.Info("AAuth verifier enabled", "mode", string(verifyMode))
 	}
 
 	httpServer, err := httpserver.NewHTTPServer(httpserver.ServerConfig{
@@ -908,6 +927,7 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		SubstrateHarnessClient:    substrateHarnessClient,
 		AAuthIssuer:               aauthIssuer,
 		AAuthSubjectAuthenticator: aauthSubject,
+		AAuthVerifier:             aauthVerifier,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create HTTP server")

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
 	"github.com/kagent-dev/kagent/go/api/v1alpha2"
@@ -287,6 +288,21 @@ func buildPodRuntime(
 		MountPath: "/var/run/secrets/tokens",
 	})
 
+	// When AAuth is enabled on this agent, project an additional SA token
+	// scoped to the kagent-controller audience. The agent's Python signer
+	// presents this token to POST /aauth/agent-jwt; the controller's
+	// TokenReview enforces the audience, so a token leaked from this pod
+	// cannot be replayed against any other service that calls TokenReview
+	// without an audience check.
+	if aauthEnabled(manifestCtx.agent) {
+		volumes = append(volumes, aauthProjectedTokenVolume())
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      aauthTokenVolumeName,
+			MountPath: aauthTokenMountDir,
+			ReadOnly:  true,
+		})
+	}
+
 	if needsSRTSettings(manifestCtx.agent, sandboxCfg) {
 		sharedEnv = append(sharedEnv, corev1.EnvVar{
 			Name:  env.KagentSRTSettingsPath.Name(),
@@ -358,8 +374,7 @@ func collectSharedEnv(agent v1alpha2.AgentObject) []corev1.EnvVar {
 		},
 	)
 
-	spec := agent.GetAgentSpec()
-	if spec.Declarative != nil && spec.Declarative.AAuth != nil && spec.Declarative.AAuth.Enabled {
+	if aauthEnabled(agent) {
 		sharedEnv = append(sharedEnv,
 			corev1.EnvVar{
 				Name:  env.AAuthEnabled.Name(),
@@ -377,7 +392,27 @@ func collectSharedEnv(agent v1alpha2.AgentObject) []corev1.EnvVar {
 				Name:  env.AAuthControllerURL.Name(),
 				Value: fmt.Sprintf("http://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace()),
 			},
+			// Hardening: point the signer at the audience-scoped SA token
+			// mounted by buildPodRuntime. The controller's TokenReview rejects
+			// any token without the kagent-controller audience.
+			corev1.EnvVar{
+				Name:  env.AAuthSATokenPath.Name(),
+				Value: AAuthTokenFilePath,
+			},
 		)
+		// Phase 3: when the controller's canonical issuer URL is non-cluster
+		// (the demo uses http://localhost:8083 reached via port-forward), tell
+		// the agent's inbound verifier how to reach the controller in-cluster
+		// for JWKS fetches.
+		if canonical := os.Getenv("AAUTH_ISSUER_URL"); canonical != "" {
+			inCluster := fmt.Sprintf("http://%s.%s:8083", utils.GetControllerName(), utils.GetResourceNamespace())
+			if canonical != inCluster {
+				sharedEnv = append(sharedEnv, corev1.EnvVar{
+					Name:  env.AAuthVerifyIssuerRewrite.Name(),
+					Value: canonical + "=" + inCluster,
+				})
+			}
+		}
 	}
 
 	return sharedEnv
@@ -459,6 +494,48 @@ func projectedTokenVolume() corev1.Volume {
 			},
 		},
 	}
+}
+
+// AAuth audience-scoped ServiceAccount token, projected only when the agent
+// has spec.aauth.enabled=true. Mounted read-only at a dedicated path so the
+// Python signer can present it as a Bearer credential to the controller's
+// /aauth/agent-jwt endpoint. The "kagent-controller" audience is enforced
+// by the controller's TokenReview call.
+const (
+	aauthTokenVolumeName   = "aauth-controller-token"
+	aauthTokenMountDir     = "/var/run/secrets/kagent.dev/aauth"
+	aauthTokenFileName     = "token"
+	aauthTokenAudience     = "kagent-controller"
+	aauthTokenExpirationSeconds = int64(3600)
+)
+
+// AAuthTokenFilePath is the in-pod path where the audience-scoped SA token
+// is mounted (exported for use by the env var injection).
+var AAuthTokenFilePath = aauthTokenMountDir + "/" + aauthTokenFileName
+
+func aauthProjectedTokenVolume() corev1.Volume {
+	exp := aauthTokenExpirationSeconds
+	return corev1.Volume{
+		Name: aauthTokenVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{{
+					ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+						Audience:          aauthTokenAudience,
+						ExpirationSeconds: &exp,
+						Path:              aauthTokenFileName,
+					},
+				}},
+			},
+		},
+	}
+}
+
+func aauthEnabled(agent v1alpha2.AgentObject) bool {
+	spec := agent.GetAgentSpec()
+	return spec.Declarative != nil &&
+		spec.Declarative.AAuth != nil &&
+		spec.Declarative.AAuth.Enabled
 }
 
 func buildContainerSecurityContext(

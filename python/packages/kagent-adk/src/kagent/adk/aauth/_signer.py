@@ -23,9 +23,12 @@ hwk for the life of the process (we do not retroactively upgrade).
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import time
+from typing import Any
 
 import httpx
 
@@ -38,6 +41,45 @@ try:
 except ImportError:
     _aauth_lib = None  # type: ignore[assignment]
     _AAUTH_AVAILABLE = False
+
+
+def _decode_jwt_unsafe(token: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Decode a JWT's header and payload without verifying the signature.
+
+    Used only for human-readable logging at mint/refresh time. The signature
+    is left untouched — the agent just received this token from the
+    controller it trusts, so a verify here would be redundant ceremony.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None, None
+
+        def _b64(seg: str) -> bytes:
+            pad = "=" * (-len(seg) % 4)
+            return base64.urlsafe_b64decode(seg + pad)
+
+        header = json.loads(_b64(parts[0]))
+        claims = json.loads(_b64(parts[1]))
+        return header, claims
+    except Exception:
+        return None, None
+
+
+def _format_jwt_timing(claims: dict[str, Any]) -> str:
+    """Render iat / exp / TTL as ISO-8601 UTC for human-readable logging."""
+    from datetime import datetime, timezone
+
+    def _fmt(secs: object) -> str:
+        if not isinstance(secs, (int, float)):
+            return "?"
+        return datetime.fromtimestamp(int(secs), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    iat, exp = claims.get("iat"), claims.get("exp")
+    ttl = None
+    if isinstance(iat, (int, float)) and isinstance(exp, (int, float)):
+        ttl = int(exp - iat)
+    return f"iat={_fmt(iat)} exp={_fmt(exp)} ttl_seconds={ttl}"
 
 
 # Path on the controller that mints aa-agent+jwt tokens.
@@ -53,7 +95,19 @@ _MIN_RETRY_SECONDS = 30.0
 # Default location of the projected ServiceAccount token in a Kubernetes pod.
 # The kubelet rotates this file periodically, so it is re-read on every mint
 # request (not cached).
-_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+_DEFAULT_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+
+def _resolve_sa_token_path() -> str:
+    """Return the SA token path the signer should read.
+
+    Honors ``AAUTH_SA_TOKEN_PATH`` (set by the kagent controller to point at
+    the audience-scoped projected token mounted under
+    ``/var/run/secrets/kagent.dev/aauth/token``). Falls back to the default
+    SA token mount when unset, which keeps the signer working in tests and
+    when running outside a kagent-managed pod.
+    """
+    return os.getenv("AAUTH_SA_TOKEN_PATH", "").strip() or _DEFAULT_SA_TOKEN_PATH
 
 
 def _read_sa_token() -> str | None:
@@ -65,10 +119,12 @@ def _read_sa_token() -> str | None:
     when running outside a K8s pod (tests, local dev, etc.).
 
     The path is looked up at call time (not bound as a default arg) so tests
-    can patch ``_SA_TOKEN_PATH`` to point at a fixture file.
+    can patch ``AAUTH_SA_TOKEN_PATH`` / ``_DEFAULT_SA_TOKEN_PATH`` and have
+    the change take effect.
     """
+    path = _resolve_sa_token_path()
     try:
-        with open(_SA_TOKEN_PATH) as fh:
+        with open(path) as fh:
             return fh.read().strip() or None
     except OSError:
         return None
@@ -126,7 +182,7 @@ class AAuthSigner:
         else:
             logger.warning(
                 "AAuth: no ServiceAccount token found at %s — the controller will reject this mint request",
-                _SA_TOKEN_PATH,
+                _resolve_sa_token_path(),
             )
         return url, body, headers
 
@@ -144,7 +200,20 @@ class AAuthSigner:
         self._jwt_exp = time.time() + expires_in
         self._sig_scheme = "jwt"
         verb = "refreshed" if refresh else "minted"
-        logger.info("AAuth: %s aa-agent+jwt — expires_in=%s", verb, data.get("expires_in"))
+        header, claims = _decode_jwt_unsafe(token)
+        logger.info(
+            "AAuth: %s aa-agent+jwt — expires_in=%s\n"
+            "  token=%s\n"
+            "  header=%s\n"
+            "  claims=%s\n"
+            "  timing=%s",
+            verb,
+            data.get("expires_in"),
+            token,
+            json.dumps(header, indent=2, sort_keys=True) if header is not None else "<undecodable>",
+            json.dumps(claims, indent=2, sort_keys=True) if claims is not None else "<undecodable>",
+            _format_jwt_timing(claims) if claims is not None else "<unavailable>",
+        )
         return True
 
     def _fetch_jwt_sync(self, controller_url: str) -> None:
