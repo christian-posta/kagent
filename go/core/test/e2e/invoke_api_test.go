@@ -198,12 +198,15 @@ func setupAgentWithOptions(t *testing.T, cli client.Client, modelConfigName stri
 	return agent
 }
 
-// setupSandboxAgentWithOptions creates and returns a sandbox agent resource with custom options.
-func setupSandboxAgentWithOptions(t *testing.T, cli client.Client, modelConfigName string, tools []*v1alpha2.Tool, opts AgentOptions) *v1alpha2.SandboxAgent {
-	agent := generateSandboxAgent(modelConfigName, tools, opts)
+// setupSandboxModeAgentWithOptions creates an Agent CR with
+// spec.workloadMode=sandbox and waits for Ready. After the SandboxAgent
+// unification (SUBSTRATE.md §21) the sandbox-mode runtime is a field on
+// Agent, not a separate CRD — so we wait on agents.kagent.dev now.
+func setupSandboxModeAgentWithOptions(t *testing.T, cli client.Client, modelConfigName string, tools []*v1alpha2.Tool, opts AgentOptions) *v1alpha2.Agent {
+	agent := generateSandboxModeAgent(modelConfigName, tools, opts)
 	err := cli.Create(t.Context(), agent)
 	if err != nil {
-		t.Fatalf("failed to create sandbox agent: %v", err)
+		t.Fatalf("failed to create sandbox-mode agent: %v", err)
 	}
 	cleanup(t, cli, agent)
 
@@ -212,7 +215,7 @@ func setupSandboxAgentWithOptions(t *testing.T, cli client.Client, modelConfigNa
 		"--for",
 		"condition=Ready",
 		"--timeout=1m",
-		"sandboxagents.kagent.dev",
+		"agents.kagent.dev",
 		agent.Name,
 		"-n",
 		"kagent",
@@ -236,8 +239,9 @@ func setupA2AClient(t *testing.T, agent *v1alpha2.Agent) *a2aclient.A2AClient {
 	return a2aClient
 }
 
-// setupSandboxA2AClient creates an A2A client for the test sandbox agent.
-func setupSandboxA2AClient(t *testing.T, agent *v1alpha2.SandboxAgent) *a2aclient.A2AClient {
+// setupSandboxModeA2AClient creates an A2A client for a sandbox-mode Agent.
+// The A2A URL is the unified /api/a2a path (SUBSTRATE.md §21).
+func setupSandboxModeA2AClient(t *testing.T, agent *v1alpha2.Agent) *a2aclient.A2AClient {
 	a2aClient, err := a2aclient.NewA2AClient(a2aURL(agent.Namespace, agent.Name, true))
 	require.NoError(t, err)
 	return a2aClient
@@ -373,17 +377,16 @@ func runStreamingTest(t *testing.T, a2aClient *a2aclient.A2AClient, userMessage,
 	require.NoError(t, err, lastJSON)
 }
 
-func a2aURL(namespace, name string, sandbox bool) string {
+func a2aURL(namespace, name string, _ bool) string {
 	kagentURL := os.Getenv("KAGENT_URL")
 	if kagentURL == "" {
 		// if running locally on kind, do "kubectl port-forward -n kagent deployments/kagent-controller 8083"
 		kagentURL = "http://localhost:8083"
 	}
-	path := "/api/a2a/"
-	if sandbox {
-		path = "/api/a2a-sandboxes/"
-	}
-	return kagentURL + path + namespace + "/" + name
+	// After the Agent+SandboxAgent unification (SUBSTRATE.md §21) all agents
+	// share the /api/a2a path; the sandbox bool is retained for ABI stability
+	// with existing call sites.
+	return kagentURL + "/api/a2a/" + namespace + "/" + name
 }
 
 func a2aUrl(namespace, name string) string {
@@ -511,12 +514,14 @@ func generateAgent(modelConfigName string, tools []*v1alpha2.Tool, opts AgentOpt
 	return agent
 }
 
-func generateSandboxAgent(modelConfigName string, tools []*v1alpha2.Tool, opts AgentOptions) *v1alpha2.SandboxAgent {
+// generateSandboxModeAgent builds an Agent with spec.workloadMode=sandbox.
+// Replaces the pre-unification helper that returned a SandboxAgent CR
+// (see SUBSTRATE.md §21 — SandboxAgent was folded into Agent).
+func generateSandboxModeAgent(modelConfigName string, tools []*v1alpha2.Tool, opts AgentOptions) *v1alpha2.Agent {
 	agent := generateAgent(modelConfigName, tools, opts)
-	return &v1alpha2.SandboxAgent{
-		ObjectMeta: agent.ObjectMeta,
-		Spec:       agent.Spec,
-	}
+	sandboxMode := v1alpha2.WorkloadModeSandbox
+	agent.Spec.WorkloadMode = &sandboxMode
+	return agent
 }
 
 func generateMCPServer() *v1alpha1.MCPServer {
@@ -654,9 +659,9 @@ func TestE2EInvokeSandboxAgent(t *testing.T) {
 	}
 
 	modelCfg := setupModelConfig(t, cli, baseURL)
-	agent := setupSandboxAgentWithOptions(t, cli, modelCfg.Name, tools, AgentOptions{Stream: true})
+	agent := setupSandboxModeAgentWithOptions(t, cli, modelCfg.Name, tools, AgentOptions{Stream: true})
 
-	a2aClient := setupSandboxA2AClient(t, agent)
+	a2aClient := setupSandboxModeA2AClient(t, agent)
 	var taskResult *protocol.Task
 
 	t.Run("sync_invocation", func(t *testing.T) {
@@ -1478,16 +1483,16 @@ func TestE2ESandboxAgentNetworkAllowlistWithExecuteCode(t *testing.T) {
 	controllerHost := fmt.Sprintf("%s.%s", utils.GetControllerName(), utils.GetResourceNamespace())
 
 	t.Run("deny_by_default", func(t *testing.T) {
-		agent := setupSandboxAgentWithOptions(t, cli, modelCfg.Name, nil, AgentOptions{
+		agent := setupSandboxModeAgentWithOptions(t, cli, modelCfg.Name, nil, AgentOptions{
 			ExecuteCode: new(true),
 		})
 
-		a2aClient := setupSandboxA2AClient(t, agent)
+		a2aClient := setupSandboxModeA2AClient(t, agent)
 		runSyncTest(t, a2aClient, "check the controller health in python", "NETWORK_DENIED", nil)
 	})
 
 	t.Run("allowlist_enables_access", func(t *testing.T) {
-		agent := setupSandboxAgentWithOptions(t, cli, modelCfg.Name, nil, AgentOptions{
+		agent := setupSandboxModeAgentWithOptions(t, cli, modelCfg.Name, nil, AgentOptions{
 			ExecuteCode: new(true),
 			Sandbox: &v1alpha2.SandboxConfig{
 				Network: &v1alpha2.NetworkConfig{
@@ -1496,7 +1501,7 @@ func TestE2ESandboxAgentNetworkAllowlistWithExecuteCode(t *testing.T) {
 			},
 		})
 
-		a2aClient := setupSandboxA2AClient(t, agent)
+		a2aClient := setupSandboxModeA2AClient(t, agent)
 		runSyncTest(t, a2aClient, "check the controller health in python", "controller health is ok", nil)
 	})
 }

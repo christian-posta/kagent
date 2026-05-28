@@ -8,7 +8,6 @@ import {
   DeclarativeAgentSpec,
   DeclarativeRuntime,
   PromptSource,
-  SandboxAgent,
   SkillForAgent,
   Tool,
 } from "@/types";
@@ -234,17 +233,22 @@ function fromAgentFormDataToAgent(agentFormData: AgentFormData): Agent {
   return base as Agent;
 }
 
-function fromAgentFormDataToSandboxAgent(agentFormData: AgentFormData): SandboxAgent {
+// fromAgentFormDataToSandboxModeAgent builds a kind=Agent CR with
+// spec.workloadMode=sandbox from the form's "Sandbox workload" option.
+// Prior to the SandboxAgent unification this returned a kind=SandboxAgent
+// payload (SUBSTRATE.md §21).
+function fromAgentFormDataToSandboxModeAgent(agentFormData: AgentFormData): Agent {
   if (agentFormData.byoImage?.trim()) {
     return {
       apiVersion: "kagent.dev/v1alpha2",
-      kind: "SandboxAgent",
+      kind: "Agent",
       metadata: {
         name: agentFormData.name,
         namespace: agentFormData.namespace || "",
       },
       spec: {
         type: "BYO",
+        workloadMode: "sandbox",
         description: agentFormData.description,
         byo: {
           deployment: {
@@ -378,6 +382,7 @@ function fromAgentFormDataToSandboxAgent(agentFormData: AgentFormData): SandboxA
 
   const spec: AgentSpec = {
     type: "Declarative",
+    workloadMode: "sandbox",
     declarative: decl,
     description: agentFormData.description,
   };
@@ -389,7 +394,7 @@ function fromAgentFormDataToSandboxAgent(agentFormData: AgentFormData): SandboxA
 
   return {
     apiVersion: "kagent.dev/v1alpha2",
-    kind: "SandboxAgent",
+    kind: "Agent",
     metadata: {
       name: agentFormData.name,
       namespace: agentFormData.namespace || "",
@@ -408,9 +413,11 @@ export async function getAgent(agentName: string, namespace: string): Promise<Ba
 }
 
 /**
- * Polls GET /api/agents/{namespace}/{name} until deploymentReady is true (Sandbox: workload ready; same Ready condition as reconciler).
+ * Polls GET /api/agents/{namespace}/{name} until deploymentReady is true.
+ * Works for both deployment-mode and sandbox-mode agents — the Ready condition
+ * is the same status field set by the unified reconciler.
  */
-export async function waitForSandboxAgentReady(
+export async function waitForAgentReady(
   agentName: string,
   namespace: string,
   opts?: { timeoutMs?: number; intervalMs?: number }
@@ -431,7 +438,7 @@ export async function waitForSandboxAgentReady(
   }
   return {
     ok: false,
-    error: "Timed out waiting for sandbox agent to become ready",
+    error: "Timed out waiting for agent to become ready",
   };
 }
 
@@ -510,22 +517,25 @@ export async function createAgent(agentConfig: AgentFormData, update: boolean = 
       }
     }
 
+    // "Sandbox workload" form option produces a kind=Agent CR with
+    // spec.workloadMode=sandbox after the SandboxAgent unification
+    // (SUBSTRATE.md §21). Same endpoint as deployment-mode agents.
     if (agentConfig.type === "Sandbox") {
-      const sandboxPayload = fromAgentFormDataToSandboxAgent(agentConfig);
-      const ns = sandboxPayload.metadata.namespace || "";
-      const name = sandboxPayload.metadata.name;
-      const path = update ? `/sandboxagents/${ns}/${name}` : `/sandboxagents`;
+      const sandboxAgentPayload = fromAgentFormDataToSandboxModeAgent(agentConfig);
+      const ns = sandboxAgentPayload.metadata.namespace || "";
+      const name = sandboxAgentPayload.metadata.name;
+      const path = update ? `/agents/${ns}/${name}` : `/agents`;
       const response = await fetchApi<BaseResponse<AgentResponse>>(path, {
         method: update ? "PUT" : "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(sandboxPayload),
+        body: JSON.stringify(sandboxAgentPayload),
       });
 
       const agent = response.data?.agent;
       if (!agent) {
-        throw new Error("Failed to create sandbox agent");
+        throw new Error("Failed to create sandbox-mode agent");
       }
 
       const agentRef = k8sRefUtils.toRef(agent.metadata.namespace || "", agent.metadata.name);

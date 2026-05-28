@@ -1,0 +1,27 @@
+# Demo-only Dockerfile that ships a pre-built controller binary.
+#
+# The default go/Dockerfile won't work for the substrate PoC because
+# go.mod carries a local `replace` directive pointing at the
+# agent-substrate source tree on the host — that path doesn't exist
+# inside the Docker build context. Until substrate publishes a stable
+# tag we can pin, we build the binary on the host and ship it via this
+# minimal distroless wrapper.
+#
+# Build the binary first (from the repo root):
+#   cd go && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
+#       go build -o /tmp/kagent-controller-substrate ./core/cmd/controller
+#
+# Then build this image (from the go/ directory):
+#   docker buildx build --push --platform linux/$(go env GOARCH) \
+#       --build-arg BINARY=/tmp/kagent-controller-substrate \
+#       -t localhost:5001/kagent-dev/kagent/controller:substrate-demo \
+#       -f Dockerfile.substrate-demo /tmp
+#
+# Or use `make build-controller-substrate-demo` which wraps both steps.
+FROM gcr.io/distroless/static:nonroot
+ARG BINARY=kagent-controller-substrate
+COPY $BINARY /app
+USER 65532:65532
+LABEL org.opencontainers.image.source=https://github.com/kagent-dev/kagent
+LABEL org.opencontainers.image.description="kagent controller (substrate PoC demo build)"
+ENTRYPOINT ["/app"]

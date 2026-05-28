@@ -10,7 +10,6 @@ import (
 	"time"
 
 	api "github.com/kagent-dev/kagent/go/api/httpapi"
-	"github.com/kagent-dev/kagent/go/api/v1alpha2"
 	"github.com/kagent-dev/kagent/go/core/cli/internal/config"
 	a2aclient "trpc.group/trpc-go/trpc-a2a-go/client"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
@@ -176,10 +175,9 @@ func InvokeCmd(ctx context.Context, cfg *InvokeCfg) {
 	}
 }
 
-func buildA2AURL(baseURL, namespace, agent string, agentResponse *api.AgentResponse) string {
-	a2aPath := "api/a2a"
-	if agentResponse != nil && agentResponse.WorkloadMode == v1alpha2.WorkloadModeSandbox {
-		a2aPath = "api/a2a-sandboxes"
-	}
-	return fmt.Sprintf("%s/%s/%s/%s", baseURL, a2aPath, namespace, agent)
+func buildA2AURL(baseURL, namespace, agent string, _ *api.AgentResponse) string {
+	// All agents share the /api/a2a path now that SandboxAgent has been
+	// folded back into Agent (SUBSTRATE.md §21). The agentResponse
+	// argument is retained for ABI stability with older clients.
+	return fmt.Sprintf("%s/%s/%s/%s", baseURL, "api/a2a", namespace, agent)
 }

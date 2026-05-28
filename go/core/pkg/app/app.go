@@ -80,6 +80,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	agentsandboxv1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	substratev1 "github.com/agent-substrate/substrate/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -100,6 +102,7 @@ func init() {
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 	utilruntime.Must(v1alpha2.AddToScheme(scheme))
 	utilruntime.Must(agentsandboxv1.AddToScheme(scheme))
+	utilruntime.Must(substratev1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -132,6 +135,12 @@ type Config struct {
 	SecureMetrics      bool
 	EnableHTTP2        bool
 	DefaultModelConfig types.NamespacedName
+	// DefaultWorkloadMode is applied to every Agent CR that doesn't set
+	// `spec.workloadMode` explicitly. Valid values: "deployment", "sandbox".
+	// Defaults to "deployment". When the substrate backend is configured
+	// (Substrate.WorkerPoolName set), helm typically flips this to "sandbox"
+	// so the whole install opts into substrate by default.
+	DefaultWorkloadMode string
 	HttpServerAddr     string
 	WatchNamespaces    string
 	A2ABaseUrl         string
@@ -148,6 +157,53 @@ type Config struct {
 		Insecure    bool
 		DialTimeout time.Duration
 		CallTimeout time.Duration
+	}
+	// Substrate selects + configures the agent-substrate (ate.dev) sandbox
+	// backend. When WorkerPoolName is non-empty the controller uses this backend
+	// instead of the default agentsxk8s. See SUBSTRATE.md for the design.
+	Substrate struct {
+		WorkerPoolNamespace string
+		WorkerPoolName      string
+		SnapshotsLocation   string
+		PauseImage          string
+		RunscAMD64URL       string
+		RunscAMD64SHA256    string
+		RunscARM64URL       string
+		RunscARM64SHA256    string
+
+		// ControlEndpoint is the gRPC target for substrate's ate-api-server.
+		// In-cluster default: "api.ate-system.svc.cluster.local:443".
+		ControlEndpoint string
+		// ControlPlaintext disables TLS for the control connection. Only safe
+		// for local/dev (e.g. when port-forwarding without certs).
+		ControlPlaintext bool
+		// RouterURL is the dial target for atenet-router that the A2A
+		// registrar uses when proxying sandbox-mode agent traffic. The actor
+		// identity travels via Host header, not the URL host.
+		// In-cluster default: "http://atenet-router.ate-system.svc".
+		RouterURL string
+
+		// IdleTimeout is how long a substrate actor must be untouched before
+		// the IdleSuspender requests a SuspendActor. Zero (or negative)
+		// disables auto-suspend.
+		IdleTimeout time.Duration
+		// IdleSweepInterval controls how often the IdleSuspender checks for
+		// expired actors. Should be smaller than IdleTimeout.
+		IdleSweepInterval time.Duration
+		// AgentImage, when non-empty, overrides the container.image emitted
+		// on every ActorTemplate with a substrate-aware kagent app image
+		// (built from python/Dockerfile.substrate). Required when running
+		// real kagent ADK agents in substrate; leave empty for the Phase 0
+		// stand-in / BYO demo path.
+		AgentImage string
+
+		// WorkerPoolAteomImage + WorkerPoolReplicas opt into the optional
+		// WorkerPoolEnsurer (see go/core/pkg/sandboxbackend/substrate/
+		// workerpool_ensurer.go). When AteomImage is set the controller
+		// auto-provisions the shared WorkerPool at startup; when empty the
+		// operator must apply it themselves (the original behavior).
+		WorkerPoolAteomImage string
+		WorkerPoolReplicas   int
 	}
 }
 
@@ -190,6 +246,8 @@ func (cfg *Config) SetFlags(commandLine *flag.FlagSet) {
 	commandLine.StringVar(&cfg.Auth.Mode, "auth-mode", "unsecure", "Authentication mode: unsecure or trusted-proxy")
 	commandLine.StringVar(&cfg.Auth.UserIDClaim, "auth-user-id-claim", "sub", "JWT claim name for user identity")
 
+	commandLine.StringVar(&cfg.DefaultWorkloadMode, "default-workload-mode", "deployment", `Default workload mode for Agent CRs that don't set spec.workloadMode. One of "deployment" (per-agent Deployment, the default) or "sandbox" (route through the configured sandbox backend, e.g. substrate).`)
+
 	commandLine.StringVar(&agent_translator.DefaultImageConfig.Registry, "image-registry", agent_translator.DefaultImageConfig.Registry, "The registry to use for the image.")
 	commandLine.StringVar(&agent_translator.DefaultImageConfig.Tag, "image-tag", agent_translator.DefaultImageConfig.Tag, "The tag to use for the image.")
 	commandLine.StringVar(&agent_translator.DefaultImageConfig.PullPolicy, "image-pull-policy", agent_translator.DefaultImageConfig.PullPolicy, "The pull policy to use for the image.")
@@ -207,6 +265,26 @@ func (cfg *Config) SetFlags(commandLine *flag.FlagSet) {
 	commandLine.BoolVar(&cfg.Openshell.Insecure, "openshell-insecure", false, "Dial the OpenShell gateway without TLS. Use only for local development.")
 	commandLine.DurationVar(&cfg.Openshell.DialTimeout, "openshell-dial-timeout", 10*time.Second, "Timeout for the initial dial to the OpenShell gateway.")
 	commandLine.DurationVar(&cfg.Openshell.CallTimeout, "openshell-call-timeout", 30*time.Second, "Per-RPC timeout for OpenShell gateway calls.")
+
+	// agent-substrate (ate.dev) sandbox backend flags. When --substrate-worker-pool-name
+	// is set, the controller emits ate.dev/v1alpha1 ActorTemplate objects for
+	// SandboxAgents instead of the default agent-sandbox Sandbox CRs.
+	commandLine.StringVar(&cfg.Substrate.WorkerPoolName, "substrate-worker-pool-name", "", "Name of the shared substrate WorkerPool. Setting this enables the substrate backend.")
+	commandLine.StringVar(&cfg.Substrate.WorkerPoolNamespace, "substrate-worker-pool-namespace", "", "Namespace of the shared substrate WorkerPool.")
+	commandLine.StringVar(&cfg.Substrate.SnapshotsLocation, "substrate-snapshots-location", "gs://ate-snapshots", "URI prefix for substrate actor snapshots (e.g. gs://my-bucket or s3://my-bucket). The per-agent path is appended automatically.")
+	commandLine.StringVar(&cfg.Substrate.PauseImage, "substrate-pause-image", "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4", "Pause container image substrate uses as the sandbox root.")
+	commandLine.StringVar(&cfg.Substrate.RunscAMD64URL, "substrate-runsc-amd64-url", "gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc", "gs:// URL of the amd64 runsc binary substrate downloads.")
+	commandLine.StringVar(&cfg.Substrate.RunscAMD64SHA256, "substrate-runsc-amd64-sha256", "a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63", "SHA256 of the amd64 runsc binary.")
+	commandLine.StringVar(&cfg.Substrate.RunscARM64URL, "substrate-runsc-arm64-url", "gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc", "gs:// URL of the arm64 runsc binary substrate downloads.")
+	commandLine.StringVar(&cfg.Substrate.RunscARM64SHA256, "substrate-runsc-arm64-sha256", "1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9", "SHA256 of the arm64 runsc binary.")
+	commandLine.StringVar(&cfg.Substrate.ControlEndpoint, "substrate-control-endpoint", "api.ate-system.svc.cluster.local:443", "gRPC target for substrate's ate-api-server Control API.")
+	commandLine.BoolVar(&cfg.Substrate.ControlPlaintext, "substrate-control-plaintext", false, "Disable TLS for the substrate Control gRPC connection. Local/dev only.")
+	commandLine.StringVar(&cfg.Substrate.RouterURL, "substrate-router-url", "http://atenet-router.ate-system.svc", "Dial target for substrate's atenet-router. The A2A registrar uses this URL for sandbox-mode agents; actor identity is carried in the Host header.")
+	commandLine.DurationVar(&cfg.Substrate.IdleTimeout, "substrate-idle-timeout", 0, "Auto-suspend substrate actors that haven't seen a request for this long. Zero disables auto-suspend (operators must call `kubectl ate suspend actor` manually).")
+	commandLine.DurationVar(&cfg.Substrate.IdleSweepInterval, "substrate-idle-sweep-interval", 30*time.Second, "How often the IdleSuspender checks for expired substrate actors.")
+	commandLine.StringVar(&cfg.Substrate.AgentImage, "substrate-agent-image", "", "Container image for substrate-mode agents that contains the substrate config-via-env shim (built via python/Dockerfile.substrate). When empty, the translator's default image is used unchanged.")
+	commandLine.StringVar(&cfg.Substrate.WorkerPoolAteomImage, "substrate-worker-pool-ateom-image", "", "ateom-gvisor container image to use when auto-provisioning the shared WorkerPool. When set, the controller creates+updates the WorkerPool referenced by --substrate-worker-pool-name. When empty, no auto-provisioning happens and the operator must apply the WorkerPool themselves.")
+	commandLine.IntVar(&cfg.Substrate.WorkerPoolReplicas, "substrate-worker-pool-replicas", 2, "Initial replica count for the auto-provisioned WorkerPool. Only used at create time — once the WorkerPool exists, operators can scale it manually without the ensurer reverting.")
 
 	commandLine.StringVar(&agent_translator.DefaultServiceAccountName, "default-service-account-name", "", "Global default ServiceAccount name for agent pods. When set, agents without an explicit serviceAccountName will use this instead of creating a per-agent ServiceAccount.")
 
@@ -293,6 +371,17 @@ type ExtensionConfig struct {
 	AgentPlugins     []agent_translator.TranslatorPlugin
 	MCPServerPlugins []translator.MCPTranslatorPlugin
 	SandboxBackend   sandboxbackend.Backend
+	// SandboxRouting is an optional override that lets the active sandbox
+	// backend customize how the A2A registrar dials sandbox-mode agents.
+	// nil = use the default per-agent Service URL. Substrate supplies a
+	// non-nil func that routes through atenet-router with a Host-header-
+	// encoded actor identity.
+	SandboxRouting sandboxbackend.SandboxRoutingFunc
+	// ManagerRunnables are backend-specific background loops that should join
+	// the manager lifecycle (Start/Stop with the manager). Substrate uses
+	// this for its IdleSuspender sweep loop. Each runnable's Start runs in
+	// its own goroutine; nil entries are ignored.
+	ManagerRunnables []manager.Runnable
 }
 
 type GetExtensionConfig func(bootstrap BootstrapConfig) (*ExtensionConfig, error)
@@ -326,6 +415,12 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		setupLog.Error(err, "failed to load configuration from environment variables")
 		os.Exit(1)
 	}
+
+	// Wire DefaultWorkloadMode into v1alpha2 so AgentObject.GetWorkloadMode()
+	// falls back to it when the per-Agent spec.workloadMode is unset.
+	// Empty string is fine — SetDefaultWorkloadMode ignores unknown values
+	// and the package default ("deployment") stays in place.
+	v1alpha2.SetDefaultWorkloadMode(v1alpha2.WorkloadMode(cfg.DefaultWorkloadMode))
 
 	logger := zap.New(zap.UseFlagOptions(&opts))
 	ctrl.SetLogger(logger)
@@ -548,21 +643,15 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		os.Exit(1)
 	}
 
+	// Single controller after the SandboxAgent unification (SUBSTRATE.md §21).
+	// AgentController's reconciler dispatches on agent.GetWorkloadMode() for
+	// the sandbox-vs-deployment branch.
 	if err = (&controller.AgentController{
 		Scheme:        mgr.GetScheme(),
 		Reconciler:    rcnclr,
 		AdkTranslator: apiTranslator,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
-		os.Exit(1)
-	}
-
-	if err = (&controller.SandboxAgentController{
-		Scheme:        mgr.GetScheme(),
-		Reconciler:    rcnclr,
-		AdkTranslator: apiTranslator,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "SandboxAgent")
 		os.Exit(1)
 	}
 
@@ -614,21 +703,37 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		os.Exit(1)
 	}
 
-	// Register A2A handlers on all replicas
-	a2aHandler := a2a.NewA2AHttpMux(httpserver.APIPathA2A, httpserver.APIPathA2ASandboxes, extensionCfg.Authenticator)
+	// Register A2A handlers on all replicas. After the Agent+SandboxAgent
+	// unification (SUBSTRATE.md §21) all agent traffic flows through the
+	// single APIPathA2A path; sandbox-mode agents are distinguished by
+	// workloadMode at the per-agent transport, not by a separate route.
+	a2aHandler := a2a.NewA2AHttpMux(httpserver.APIPathA2A, extensionCfg.Authenticator)
 
 	if err := mgr.Add(a2a.NewA2ARegistrar(
 		mgr.GetCache(),
 		a2aHandler,
 		cfg.A2ABaseUrl+httpserver.APIPathA2A,
-		cfg.A2ABaseUrl+httpserver.APIPathA2ASandboxes,
 		extensionCfg.Authenticator,
 		int(cfg.Streaming.MaxBufSize.Value()),
 		int(cfg.Streaming.InitialBufSize.Value()),
 		cfg.Streaming.Timeout,
+		extensionCfg.SandboxRouting,
 	)); err != nil {
 		setupLog.Error(err, "unable to set up a2a registrar")
 		os.Exit(1)
+	}
+
+	// Add any backend-supplied manager runnables (e.g. substrate's idle
+	// suspender sweep loop). nil entries are ignored to keep the slot
+	// trivially safe.
+	for _, r := range extensionCfg.ManagerRunnables {
+		if r == nil {
+			continue
+		}
+		if err := mgr.Add(r); err != nil {
+			setupLog.Error(err, "unable to add backend-supplied runnable")
+			os.Exit(1)
+		}
 	}
 
 	// Create MCP handler that bridges to A2A

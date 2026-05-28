@@ -1,0 +1,49 @@
+# A2.6 — real kagent ADK agent inside a substrate sandbox.
+#
+# Differs from 03-agents.yaml (which uses type: BYO + the Phase 0 dummy
+# FastAPI). Here the SandboxAgent is type: Declarative with a real
+# ModelConfig. The substrate-flavored kagent app image
+# (localhost:5001/kagent-dev/kagent/app-substrate:dev, built from
+# python/Dockerfile.substrate) hosts the actual kagent-adk runtime
+# inside the gVisor sandbox.
+#
+# Apply order:
+#   1. Provide an OpenAI API key:
+#        kubectl create secret generic kagent-openai \
+#          -n kagent-substrate-poc \
+#          --from-literal=OPENAI_API_KEY="<your-key-or-anything>"
+#      (A fake/blank key is fine for the suspend/resume demo — the agent
+#      process boots successfully and substrate's golden snapshot completes
+#      because substrate doesn't probe the LLM. Sending an actual A2A
+#      message will fail at the OpenAI auth step, but that's expected.)
+#
+#   2. kubectl apply -f 04-real-agent.yaml
+#
+#   3. kubectl wait sandboxagent real-assistant -n kagent-substrate-poc \
+#         --for=condition=Ready --timeout=5m
+---
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: openai-gpt4o-mini
+  namespace: kagent-substrate-poc
+spec:
+  provider: OpenAI
+  model: gpt-4o-mini
+  apiKeySecret: kagent-openai
+  apiKeySecretKey: OPENAI_API_KEY
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: real-assistant-v3
+  namespace: kagent-substrate-poc
+  labels:
+    demo.kagent.dev/group: substrate-poc
+spec:
+  description: Phase A2 sanity agent — proves real kagent ADK runs inside substrate.
+  type: Declarative
+  declarative:
+    modelConfig: openai-gpt4o-mini
+    systemMessage: |
+      You are a terse assistant. Reply in one sentence.

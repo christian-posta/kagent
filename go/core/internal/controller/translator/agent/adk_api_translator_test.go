@@ -1306,7 +1306,7 @@ func Test_AdkApiTranslator_ContextConfig(t *testing.T) {
 	}
 }
 
-func Test_AdkApiTranslator_SandboxAgent_defaultEmitsSandbox(t *testing.T) {
+func Test_AdkApiTranslator_SandboxModeAgent_defaultEmitsSandbox(t *testing.T) {
 	ctx := context.Background()
 	scheme := schemev1.Scheme
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
@@ -1320,10 +1320,12 @@ func Test_AdkApiTranslator_SandboxAgent_defaultEmitsSandbox(t *testing.T) {
 			Provider: v1alpha2.ModelProviderOpenAI,
 		},
 	}
-	sa := &v1alpha2.SandboxAgent{
+	sandboxMode := v1alpha2.WorkloadModeSandbox
+	sa := &v1alpha2.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "ag1", Namespace: "sandbox-ns"},
 		Spec: v1alpha2.AgentSpec{
-			Type: v1alpha2.AgentType_Declarative,
+			Type:         v1alpha2.AgentType_Declarative,
+			WorkloadMode: &sandboxMode,
 			Declarative: &v1alpha2.DeclarativeAgentSpec{
 				SystemMessage: "You are a sandboxed agent",
 				ModelConfig:   "m1",
@@ -1362,7 +1364,7 @@ func Test_AdkApiTranslator_SandboxAgent_defaultEmitsSandbox(t *testing.T) {
 	require.False(t, sawService, "sandbox runtime must not include Service; agent-sandbox owns it")
 }
 
-func Test_AdkApiTranslator_SandboxAgent_BYOEmitsSandbox(t *testing.T) {
+func Test_AdkApiTranslator_SandboxModeAgent_BYOEmitsSandbox(t *testing.T) {
 	ctx := context.Background()
 	scheme := schemev1.Scheme
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
@@ -1370,10 +1372,12 @@ func Test_AdkApiTranslator_SandboxAgent_BYOEmitsSandbox(t *testing.T) {
 
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-ns"}}
 	cmd := "/app/run"
-	sa := &v1alpha2.SandboxAgent{
+	sandboxMode := v1alpha2.WorkloadModeSandbox
+	sa := &v1alpha2.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "byo-sb", Namespace: "sandbox-ns"},
 		Spec: v1alpha2.AgentSpec{
-			Type: v1alpha2.AgentType_BYO,
+			Type:         v1alpha2.AgentType_BYO,
+			WorkloadMode: &sandboxMode,
 			BYO: &v1alpha2.BYOAgentSpec{
 				Deployment: &v1alpha2.ByoDeploymentSpec{
 					Image: "example.com/agent:1",

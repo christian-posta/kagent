@@ -57,6 +57,19 @@ type AgentSpec struct {
 	// +kubebuilder:default=Declarative
 	Type AgentType `json:"type"`
 
+	// WorkloadMode selects how the controller materializes this Agent at
+	// runtime. "deployment" emits a per-agent Deployment+Service via the
+	// configured deployment backend (the default). "sandbox" routes the
+	// Agent through the active sandbox backend (e.g. agent-substrate),
+	// producing an ActorTemplate plus on-demand resume; no per-agent Pod
+	// exists at rest.
+	//
+	// Unset → falls back to the controller's --default-workload-mode flag
+	// (chart value `defaultWorkloadMode`).
+	// +kubebuilder:validation:Enum=deployment;sandbox
+	// +optional
+	WorkloadMode *WorkloadMode `json:"workloadMode,omitempty"`
+
 	// +optional
 	BYO *BYOAgentSpec `json:"byo,omitempty"`
 	// +optional

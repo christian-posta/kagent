@@ -462,11 +462,8 @@ func (m *workspaceModel) startChat(loadHistory bool) tea.Cmd {
 	if m.agent == nil || m.current == nil {
 		return nil
 	}
-	a2aPath := "api/a2a"
-	if m.agent != nil && m.agent.WorkloadMode == v1alpha2.WorkloadModeSandbox {
-		a2aPath = "api/a2a-sandboxes"
-	}
-	a2aURL := fmt.Sprintf("%s/%s/%s", m.cfg.KAgentURL, a2aPath, m.agentRef)
+	// All agents share /api/a2a now (SUBSTRATE.md §21 — Agent+SandboxAgent unification).
+	a2aURL := fmt.Sprintf("%s/%s/%s", m.cfg.KAgentURL, "api/a2a", m.agentRef)
 	client, err := a2aclient.NewA2AClient(a2aURL,
 		a2aclient.WithTimeout(m.cfg.Timeout),
 	)

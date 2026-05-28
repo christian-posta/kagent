@@ -98,16 +98,13 @@ func AgentResourceFrom(agent v1alpha2.AgentObject) *AgentResource {
 		apiVersion = v1alpha2.GroupVersion.String()
 	}
 	if kind == "" {
-		if agent.GetWorkloadMode() == v1alpha2.WorkloadModeSandbox {
-			kind = "SandboxAgent"
-		} else {
-			kind = "Agent"
-		}
+		// Only one CRD kind after the SandboxAgent unification
+		// (SUBSTRATE.md §21). WorkloadMode is now a field on AgentSpec, not
+		// derived from kind.
+		kind = "Agent"
 	}
 	switch typed := agent.(type) {
 	case *v1alpha2.Agent:
-		metadata = *typed.ObjectMeta.DeepCopy()
-	case *v1alpha2.SandboxAgent:
 		metadata = *typed.ObjectMeta.DeepCopy()
 	default:
 		metadata = metav1.ObjectMeta{

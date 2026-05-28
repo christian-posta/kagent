@@ -148,6 +148,12 @@ controller:
     # JWT claim for user identity (default: "sub")
     # Override only if your OIDC provider uses a different claim
     userIdClaim: ""
+  # -- Default workload mode for Agent CRs that don't set spec.workloadMode.
+  # "deployment" (default) → per-agent Deployment via the default backend.
+  # "sandbox" → route through the configured sandbox backend (e.g. substrate).
+  # When substrate.enabled=true, flip this to "sandbox" so the whole install
+  # opts into substrate by default; users can still override per-agent.
+  defaultWorkloadMode: "deployment"
   # -- Global deployment defaults applied to all agent pods.
   # Per-agent settings in the Agent CRD take precedence over these defaults.
   agentDeployment:
@@ -242,6 +248,48 @@ controller:
   # - name: foo
   #   mountPath: "/etc/foo"
   #   readOnly: true
+
+# ==============================================================================
+# SUBSTRATE SANDBOX BACKEND (PoC)
+# ==============================================================================
+# When enabled, the controller drives SandboxAgent CRs through the agent-substrate
+# (ate.dev) backend instead of the default agent-sandbox path. Substrate must
+# already be installed in the cluster (kubectl get ns ate-system).
+#
+# This is a PoC integration; see SUBSTRATE.md for the design + known gaps.
+# Built-in Agent CRs still use the default Deployment-per-agent path — only
+# SandboxAgent CRs are routed through substrate.
+substrate:
+  # When false (default), no SUBSTRATE_* env vars are emitted and the controller
+  # uses the default agent-sandbox backend.
+  enabled: false
+  # Shared WorkerPool that every substrate SandboxAgent registers against.
+  # The controller's WorkerPoolEnsurer auto-creates this if workerPoolAteomImage
+  # is set; otherwise the operator must apply it manually.
+  workerPoolName: poc-pool
+  workerPoolNamespace: kagent-substrate-poc
+  workerPoolReplicas: 2
+  # ateom-gvisor image (gVisor + atelet runtime). Required for auto-provisioning.
+  # Pin to a SHA your substrate install is known to work with.
+  workerPoolAteomImage: ""
+  # gRPC target for substrate's Control API. The default points at the in-cluster
+  # ate-api-server. controlPlaintext: true disables TLS (PoC/dev only).
+  controlEndpoint: "api.ate-system.svc.cluster.local:443"
+  controlPlaintext: false
+  # atenet-router HTTP endpoint. Sandbox-mode A2A requests are dialed here with
+  # the actor identity encoded in the Host header.
+  routerURL: "http://atenet-router.ate-system.svc"
+  # URI prefix for actor snapshots. Substrate appends per-agent paths.
+  snapshotsLocation: "gs://ate-snapshots"
+  # Container image for substrate-mode agents that includes the config-via-env
+  # shim entrypoint (built from python/Dockerfile.substrate). Leave empty to use
+  # whatever image the SandboxAgent CR declares directly (BYO path).
+  agentImage: ""
+  # Auto-suspend actors that haven't seen traffic for this long. 0 disables.
+  idleTimeout: 0s
+  idleSweepInterval: 30s
+  # Pause image substrate uses as the sandbox root.
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
 
 # ==============================================================================
 # UI CONFIGURATION

@@ -284,6 +284,15 @@ build-kagent-adk: buildx-create
 build-app: buildx-create build-kagent-adk
 	$(DOCKER_BUILDER) build $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) --build-arg KAGENT_ADK_VERSION=$(KAGENT_ADK_IMAGE_TAG) --build-arg DOCKER_REGISTRY=$(DOCKER_REGISTRY) -t $(APP_IMG) -f python/Dockerfile.app ./python
 
+# Substrate-shim variant of the kagent app image (see SUBSTRATE.md §19).
+# Built on top of the standard app image with python/Dockerfile.substrate.
+APP_SUBSTRATE_IMG ?= $(DOCKER_REGISTRY)/$(DOCKER_REPO)/app-substrate:dev
+
+.PHONY: build-substrate-app
+build-substrate-app: buildx-create build-app ## Build the substrate config-via-env shim layered on top of kagent/app.
+	$(DOCKER_BUILDER) build $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) --build-arg KAGENT_ADK_VERSION=$(KAGENT_ADK_IMAGE_TAG) --build-arg DOCKER_REGISTRY=$(DOCKER_REGISTRY) --build-arg DOCKER_REPO=$(DOCKER_REPO) -t $(APP_SUBSTRATE_IMG) -f python/Dockerfile.substrate ./python
+	@echo ">> pushed $(APP_SUBSTRATE_IMG)"
+
 .PHONY: build-golang-adk
 build-golang-adk: buildx-create
 	$(DOCKER_BUILDER) build $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) --build-arg BUILD_PACKAGE=adk/cmd/main.go -t $(GOLANG_ADK_IMG) -f go/Dockerfile ./go
@@ -477,3 +486,213 @@ report/image-cve: audit build
 	grype docker:$(APP_IMG)        -o template -t reports/cve-report.tmpl --file reports/$(SEMVER)/app-cve.csv
 	grype docker:$(UI_IMG)         -o template -t reports/cve-report.tmpl --file reports/$(SEMVER)/ui-cve.csv
 	grype docker:$(SKILLS_INIT_IMG) -o template -t reports/cve-report.tmpl --file reports/$(SEMVER)/skills-init-cve.csv
+
+##@ Substrate Demo (kagent backed by agent-substrate; see SUBSTRATE.md, demo/substrate-poc/DEMO.md)
+#
+# The demo runs the controller OUT-OF-CLUSTER (binary on this host) against
+# whatever cluster `kubectl config current-context` points at. Substrate
+# itself must already be installed in `ate-system` — these targets do not
+# bring up substrate.
+
+SUBSTRATE_DEMO_NS       ?= kagent-substrate-poc
+SUBSTRATE_DEMO_POOL     ?= poc-pool
+SUBSTRATE_DEMO_IMG      ?= localhost:5001/substrate-poc-agent:p3
+SUBSTRATE_DEMO_RUNSC_SHA ?= a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63
+SUBSTRATE_DEMO_RUNSC_URL ?= https://storage.googleapis.com/gvisor/releases/nightly/2026-05-19/x86_64/runsc
+SUBSTRATE_DEMO_KIND_CTR ?= kind-control-plane
+SUBSTRATE_DEMO_PG_NAME  ?= kagent-substrate-poc-pg
+SUBSTRATE_DEMO_PG_IMG   ?= pgvector/pgvector:pg16
+# Use uncommon host ports to avoid colliding with other dev databases /
+# controllers / port-forwards the user may already have running.
+SUBSTRATE_DEMO_PG_PORT     ?= 15432
+SUBSTRATE_DEMO_CTRL_BIN ?= /tmp/kagent-controller-substrate-demo
+SUBSTRATE_DEMO_CTRL_LOG ?= /tmp/kagent-controller-substrate-demo.log
+SUBSTRATE_DEMO_PF_LOG   ?= /tmp/kagent-substrate-demo-pf.log
+SUBSTRATE_DEMO_ATENET_PORT ?= 18000
+SUBSTRATE_DEMO_API_PORT    ?= 14443
+SUBSTRATE_DEMO_HEALTH_PORT ?= 18092
+SUBSTRATE_DEMO_HTTP_PORT   ?= 18093
+SUBSTRATE_DEMO_IDLE       ?= 30s
+SUBSTRATE_DEMO_SWEEP      ?= 10s
+# When set, the controller is started with --substrate-agent-image=<this>,
+# which makes the substrate backend swap in the substrate-shim kagent ADK
+# image (built via `make build-substrate-app`) for every SandboxAgent it
+# emits. Leave empty for the Phase-0 stand-in / BYO demo path; set for A2's
+# real-ADK path. See SUBSTRATE.md §19.
+SUBSTRATE_DEMO_AGENT_IMAGE ?=
+# Ateom-gvisor image for the auto-provisioned WorkerPool (B2). When set, the
+# controller's WorkerPoolEnsurer creates the WorkerPool at startup, so
+# 01-substrate.yaml no longer carries it. Defaults to the same image substrate's
+# counter demo uses (proved to work on this kind cluster).
+SUBSTRATE_DEMO_ATEOM_IMAGE ?= localhost:5001/ateom-gvisor-34ef0400225d9f0582e4c906399c2137@sha256:6e7b187826fa2195e2b961d57f24bd74dc998e1e1852c949885dbc81aa376159
+SUBSTRATE_DEMO_POOL_REPLICAS ?= 2
+
+.PHONY: demo-substrate-preflight
+demo-substrate-preflight: ## Verify substrate is installed and the kind-registry is reachable.
+	@echo ">> verifying kubectl context: $$(kubectl config current-context)"
+	@kubectl get ns ate-system >/dev/null 2>&1 || { echo "FAIL: ate-system namespace missing — install substrate first"; exit 1; }
+	@kubectl get crd actortemplates.ate.dev workerpools.ate.dev >/dev/null 2>&1 || { echo "FAIL: substrate CRDs missing"; exit 1; }
+	@docker ps --format '{{.Names}}' | grep -q '^kind-registry$$' || { echo "FAIL: kind-registry container not running"; exit 1; }
+	@docker ps --format '{{.Names}}' | grep -q '^$(SUBSTRATE_DEMO_KIND_CTR)$$' || { echo "FAIL: kind node container '$(SUBSTRATE_DEMO_KIND_CTR)' not running"; exit 1; }
+	@which kubectl-ate >/dev/null 2>&1 || { echo "FAIL: kubectl-ate plugin not on PATH (install from agent-substrate/substrate)"; exit 1; }
+	@echo ">> OK: substrate installed, kind-registry up, kubectl-ate present"
+
+.PHONY: demo-substrate-runsc
+demo-substrate-runsc: ## Pre-stage the gVisor runsc binary on the kind node so atelet skips the slow GCS download.
+	@if docker exec $(SUBSTRATE_DEMO_KIND_CTR) test -x /run/ateom-gvisor/static-files/runsc-$(SUBSTRATE_DEMO_RUNSC_SHA); then \
+		echo ">> runsc already staged on $(SUBSTRATE_DEMO_KIND_CTR)"; \
+	else \
+		echo ">> staging runsc on $(SUBSTRATE_DEMO_KIND_CTR) (may take ~2 min on slow networks)..."; \
+		docker exec $(SUBSTRATE_DEMO_KIND_CTR) sh -c 'mkdir -p /run/ateom-gvisor/static-files && curl -fsSL -o /run/ateom-gvisor/static-files/runsc-$(SUBSTRATE_DEMO_RUNSC_SHA) $(SUBSTRATE_DEMO_RUNSC_URL) && chmod 0755 /run/ateom-gvisor/static-files/runsc-$(SUBSTRATE_DEMO_RUNSC_SHA)'; \
+		echo ">> staged: $$(docker exec $(SUBSTRATE_DEMO_KIND_CTR) sha256sum /run/ateom-gvisor/static-files/runsc-$(SUBSTRATE_DEMO_RUNSC_SHA))"; \
+	fi
+
+.PHONY: demo-substrate-image
+demo-substrate-image: ## Build the Phase-0 stand-in agent image and push to kind-registry.
+	@cd demo/substrate-poc && docker build -t $(SUBSTRATE_DEMO_IMG) . >/dev/null
+	@docker push $(SUBSTRATE_DEMO_IMG) >/dev/null
+	@echo ">> pushed $(SUBSTRATE_DEMO_IMG)"
+
+.PHONY: demo-substrate-crds
+demo-substrate-crds: ## Install kagent CRDs (large Agent/SandboxAgent need --server-side).
+	@kubectl apply -f helm/kagent-crds/templates/kagent.dev_modelconfigs.yaml >/dev/null
+	@kubectl apply -f helm/kagent-crds/templates/kagent.dev_modelproviderconfigs.yaml >/dev/null
+	@kubectl apply -f helm/kagent-crds/templates/kagent.dev_memories.yaml >/dev/null
+	@kubectl apply -f helm/kagent-crds/templates/kagent.dev_remotemcpservers.yaml >/dev/null
+	@kubectl apply -f helm/kagent-crds/templates/kagent.dev_toolservers.yaml >/dev/null
+	@kubectl apply -f helm/kagent-crds/templates/kagent.dev_agentharnesses.yaml >/dev/null
+	@kubectl apply --server-side -f helm/kagent-crds/templates/kagent.dev_agents.yaml >/dev/null
+	@kubectl apply --server-side -f helm/kagent-crds/templates/kagent.dev_sandboxagents.yaml >/dev/null
+	@echo ">> kagent CRDs installed"
+
+.PHONY: demo-substrate-pg
+demo-substrate-pg: ## Start a local Postgres+pgvector docker for the controller.
+	@if docker ps --format '{{.Names}}' | grep -q '^$(SUBSTRATE_DEMO_PG_NAME)$$'; then \
+		echo ">> $(SUBSTRATE_DEMO_PG_NAME) already running"; \
+	else \
+		docker rm -f $(SUBSTRATE_DEMO_PG_NAME) >/dev/null 2>&1 || true; \
+		docker run -d --name $(SUBSTRATE_DEMO_PG_NAME) -p $(SUBSTRATE_DEMO_PG_PORT):5432 \
+			-e POSTGRES_PASSWORD=kagent -e POSTGRES_USER=postgres -e POSTGRES_DB=kagent \
+			$(SUBSTRATE_DEMO_PG_IMG) >/dev/null || { \
+				echo "FAIL: docker run for $(SUBSTRATE_DEMO_PG_NAME) failed (port $(SUBSTRATE_DEMO_PG_PORT) busy?)"; \
+				docker logs $(SUBSTRATE_DEMO_PG_NAME) 2>&1 | tail -5; \
+				exit 1; \
+			}; \
+		i=0; while ! docker exec $(SUBSTRATE_DEMO_PG_NAME) pg_isready -U postgres >/dev/null 2>&1; do \
+			i=$$((i+1)); \
+			if [ $$i -gt 30 ]; then \
+				echo "FAIL: $(SUBSTRATE_DEMO_PG_NAME) never became ready"; \
+				docker logs $(SUBSTRATE_DEMO_PG_NAME) 2>&1 | tail -10; \
+				exit 1; \
+			fi; \
+			sleep 1; \
+		done; \
+		echo ">> $(SUBSTRATE_DEMO_PG_NAME) ready on :$(SUBSTRATE_DEMO_PG_PORT)"; \
+	fi
+
+.PHONY: demo-substrate-pf
+demo-substrate-pf: ## Start background port-forwards for atenet-router and substrate's Control API.
+	@pkill -f "port-forward.*svc/atenet-router" 2>/dev/null || true
+	@pkill -f "port-forward.*svc/api"           2>/dev/null || true
+	@nohup kubectl port-forward -n ate-system svc/atenet-router $(SUBSTRATE_DEMO_ATENET_PORT):80 >>$(SUBSTRATE_DEMO_PF_LOG) 2>&1 &
+	@nohup kubectl port-forward -n ate-system svc/api $(SUBSTRATE_DEMO_API_PORT):443        >>$(SUBSTRATE_DEMO_PF_LOG) 2>&1 &
+	@until nc -z localhost $(SUBSTRATE_DEMO_ATENET_PORT) >/dev/null 2>&1; do sleep 1; done
+	@until nc -z localhost $(SUBSTRATE_DEMO_API_PORT)    >/dev/null 2>&1; do sleep 1; done
+	@echo ">> port-forwards live on :$(SUBSTRATE_DEMO_ATENET_PORT) (atenet) and :$(SUBSTRATE_DEMO_API_PORT) (api)"
+
+.PHONY: demo-substrate-pool
+demo-substrate-pool: ## Apply the demo Namespace (the WorkerPool is now auto-provisioned by the controller; see B2).
+	@kubectl apply -f demo/substrate-poc/01-substrate.yaml
+	@echo ">> applied 01-substrate.yaml (Namespace only; WorkerPool managed by controller via --substrate-worker-pool-ateom-image)"
+
+.PHONY: demo-substrate-controller
+demo-substrate-controller: ## Build the controller binary and start it in the background with --substrate-* flags.
+	@pkill -f "$(SUBSTRATE_DEMO_CTRL_BIN)" 2>/dev/null || true
+	@sleep 1
+	@cd go && go build -o $(SUBSTRATE_DEMO_CTRL_BIN) ./core/cmd/controller
+	@nohup $(SUBSTRATE_DEMO_CTRL_BIN) \
+		--postgres-database-url="postgres://postgres:kagent@127.0.0.1:$(SUBSTRATE_DEMO_PG_PORT)/kagent?sslmode=disable" \
+		--database-vector-enabled=true \
+		--watch-namespaces="$(SUBSTRATE_DEMO_NS)" \
+		--metrics-bind-address=0 \
+		--health-probe-bind-address=:$(SUBSTRATE_DEMO_HEALTH_PORT) \
+		--http-server-address=:$(SUBSTRATE_DEMO_HTTP_PORT) \
+		--a2a-base-url="http://127.0.0.1:$(SUBSTRATE_DEMO_HTTP_PORT)" \
+		--leader-elect=false \
+		--substrate-worker-pool-name=$(SUBSTRATE_DEMO_POOL) \
+		--substrate-worker-pool-namespace=$(SUBSTRATE_DEMO_NS) \
+		--substrate-snapshots-location=gs://ate-snapshots \
+		--substrate-pause-image="gcr.io/gke-release/pause@sha256:bcbd57ba5653580ec647b16d8163cdd1112df3609129b01f912a8032e48265da" \
+		--substrate-control-endpoint=localhost:$(SUBSTRATE_DEMO_API_PORT) \
+		--substrate-router-url=http://localhost:$(SUBSTRATE_DEMO_ATENET_PORT) \
+		--substrate-idle-timeout=$(SUBSTRATE_DEMO_IDLE) \
+		--substrate-idle-sweep-interval=$(SUBSTRATE_DEMO_SWEEP) \
+		--substrate-worker-pool-ateom-image=$(SUBSTRATE_DEMO_ATEOM_IMAGE) \
+		--substrate-worker-pool-replicas=$(SUBSTRATE_DEMO_POOL_REPLICAS) \
+		$(if $(SUBSTRATE_DEMO_AGENT_IMAGE),--substrate-agent-image=$(SUBSTRATE_DEMO_AGENT_IMAGE),) \
+		>$(SUBSTRATE_DEMO_CTRL_LOG) 2>&1 &
+	@i=0; while ! grep -qE "Starting workers|substrate-idle-suspender.*starting" $(SUBSTRATE_DEMO_CTRL_LOG) 2>/dev/null; do \
+		i=$$((i+1)); \
+		if [ $$i -gt 60 ]; then \
+			echo "FAIL: controller never reached Starting workers (last 20 log lines):"; \
+			tail -20 $(SUBSTRATE_DEMO_CTRL_LOG); \
+			exit 1; \
+		fi; \
+		if grep -qE "address already in use|FATAL|unable to (create manager|connect)" $(SUBSTRATE_DEMO_CTRL_LOG) 2>/dev/null; then \
+			echo "FAIL: controller startup error (last 10 log lines):"; \
+			tail -10 $(SUBSTRATE_DEMO_CTRL_LOG); \
+			exit 1; \
+		fi; \
+		sleep 1; \
+	done
+	@echo ">> controller running (log: $(SUBSTRATE_DEMO_CTRL_LOG))"
+
+.PHONY: demo-substrate-agents
+demo-substrate-agents: ## Apply the four demo SandboxAgents (BYO type, no model creds required).
+	@kubectl apply -f demo/substrate-poc/03-agents.yaml
+	@echo ">> waiting for all SandboxAgents to be Ready..."
+	@kubectl wait sandboxagent -n $(SUBSTRATE_DEMO_NS) --all --for=condition=Ready --timeout=300s
+	@echo ">> all SandboxAgents Ready"
+
+.PHONY: demo-substrate-up
+demo-substrate-up: demo-substrate-preflight demo-substrate-runsc demo-substrate-image demo-substrate-crds demo-substrate-pg demo-substrate-pf demo-substrate-pool demo-substrate-controller demo-substrate-agents demo-substrate-status ## Full setup. Idempotent: re-run any time to converge.
+
+.PHONY: demo-substrate-status
+demo-substrate-status: ## Print the dashboard view (SandboxAgents, workers, actors, snapshot size).
+	@SUBSTRATE_DEMO_NS=$(SUBSTRATE_DEMO_NS) SUBSTRATE_DEMO_POOL=$(SUBSTRATE_DEMO_POOL) ./demo/substrate-poc/status.sh
+
+.PHONY: demo-substrate-traffic
+demo-substrate-traffic: ## Send one request to each SandboxAgent via the kagent A2A mux (drives resume).
+	@for a in demo-alpha demo-bravo demo-charlie demo-delta; do \
+		printf "  → %-15s " "$$a"; \
+		curl -sS --max-time 30 -X POST -H "Content-Type: application/json" \
+			-d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"ping"}]}}}' \
+			http://localhost:$(SUBSTRATE_DEMO_HTTP_PORT)/api/a2a-sandboxes/$(SUBSTRATE_DEMO_NS)/$$a/ \
+			>/dev/null && echo "200" || echo "ERR"; \
+	done
+
+.PHONY: demo-substrate-logs
+demo-substrate-logs: ## Tail the controller log (Ctrl-C to stop).
+	@tail -f $(SUBSTRATE_DEMO_CTRL_LOG)
+
+.PHONY: demo-substrate-down
+demo-substrate-down: ## Tear down demo (controller, port-forwards, pg, agents, pool, ns). Leaves substrate and CRDs alone.
+	@# Delete SandboxAgents FIRST while the controller is still alive — the
+	@# kagent.dev/substrate-actor finalizer requires OnDelete to run before
+	@# K8s can remove the CR. If we killed the controller first, every
+	@# SandboxAgent would be stuck in Terminating forever.
+	@-kubectl delete -f demo/substrate-poc/03-agents.yaml --ignore-not-found --wait=true --timeout=60s 2>/dev/null
+	@-kubectl delete -f demo/substrate-poc/04-real-agent.yaml --ignore-not-found --wait=true --timeout=60s 2>/dev/null
+	@# Force-clear any straggler finalizers — happens when an old controller
+	@# died mid-cleanup or substrate was unreachable. Safe to run; no-op when
+	@# nothing's left.
+	@-for sa in $$(kubectl get sandboxagent -n $(SUBSTRATE_DEMO_NS) -o name 2>/dev/null); do \
+		kubectl patch $$sa -n $(SUBSTRATE_DEMO_NS) --type=merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null; \
+	done
+	@-pkill -f "$(SUBSTRATE_DEMO_CTRL_BIN)"            2>/dev/null
+	@-pkill -f "port-forward.*svc/atenet-router"       2>/dev/null
+	@-pkill -f "port-forward.*svc/api"                 2>/dev/null
+	@-docker rm -f $(SUBSTRATE_DEMO_PG_NAME)           2>/dev/null
+	@-kubectl delete -f demo/substrate-poc/01-substrate.yaml --ignore-not-found 2>/dev/null
+	@-kubectl delete ns $(SUBSTRATE_DEMO_NS) --ignore-not-found --timeout=60s 2>/dev/null
+	@echo ">> demo torn down (substrate + CRDs left in place)"

@@ -1,0 +1,66 @@
+# Phase 5 multi-agent demo: 4 SandboxAgents on a 2-replica WorkerPool.
+#
+# Why 4-on-2: shows the multiplex story visibly. Two agents can run
+# concurrently; the other two will go through suspend/resume churn as
+# substrate juggles workers. All four reuse the Phase 0 stand-in image so
+# nothing here needs LLM credentials.
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: demo-alpha
+  namespace: kagent-substrate-poc
+  labels:
+    demo.kagent.dev/group: substrate-poc
+spec:
+  type: BYO
+  byo:
+    deployment:
+      image: localhost:5001/substrate-poc-agent:p3
+      cmd: /usr/local/bin/uvicorn
+      args: [agent:app, --app-dir, /app, --host, 0.0.0.0, --port, "80", --log-level, info, --loop, asyncio, --http, h11]
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: demo-bravo
+  namespace: kagent-substrate-poc
+  labels:
+    demo.kagent.dev/group: substrate-poc
+spec:
+  type: BYO
+  byo:
+    deployment:
+      image: localhost:5001/substrate-poc-agent:p3
+      cmd: /usr/local/bin/uvicorn
+      args: [agent:app, --app-dir, /app, --host, 0.0.0.0, --port, "80", --log-level, info, --loop, asyncio, --http, h11]
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: demo-charlie
+  namespace: kagent-substrate-poc
+  labels:
+    demo.kagent.dev/group: substrate-poc
+spec:
+  type: BYO
+  byo:
+    deployment:
+      image: localhost:5001/substrate-poc-agent:p3
+      cmd: /usr/local/bin/uvicorn
+      args: [agent:app, --app-dir, /app, --host, 0.0.0.0, --port, "80", --log-level, info, --loop, asyncio, --http, h11]
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: demo-delta
+  namespace: kagent-substrate-poc
+  labels:
+    demo.kagent.dev/group: substrate-poc
+spec:
+  type: BYO
+  byo:
+    deployment:
+      image: localhost:5001/substrate-poc-agent:p3
+      cmd: /usr/local/bin/uvicorn
+      args: [agent:app, --app-dir, /app, --host, 0.0.0.0, --port, "80", --log-level, info, --loop, asyncio, --http, h11]

@@ -18,11 +18,13 @@ export class KagentA2AClient {
   }
 
   /**
-   * Get the A2A URL for a specific agent
+   * Get the A2A URL for a specific agent. All agents share the /a2a path
+   * after the SandboxAgent unification (SUBSTRATE.md §21); the
+   * runInSandbox parameter is retained for ABI stability with older callers
+   * but no longer changes the URL.
    */
-  getAgentUrl(namespace: string, agentName: string, runInSandbox = false): string {
-    const prefix = runInSandbox ? "a2a-sandboxes" : "a2a";
-    return `${this.baseUrl}/${prefix}/${namespace}/${agentName}`;
+  getAgentUrl(namespace: string, agentName: string, _runInSandbox = false): string {
+    return `${this.baseUrl}/a2a/${namespace}/${agentName}`;
   }
 
   /**
@@ -46,12 +48,12 @@ export class KagentA2AClient {
     agentName: string,
     params: MessageSendParams,
     signal?: AbortSignal,
-    runInSandbox = false
+    _runInSandbox = false
   ): Promise<AsyncIterable<any>> {
     const request = this.createStreamingRequest(params);
-    const proxyUrl = runInSandbox
-      ? `/a2a-sandboxes/${namespace}/${agentName}`
-      : `/a2a/${namespace}/${agentName}`;
+    // After the SandboxAgent unification (SUBSTRATE.md §21) all agents
+    // share the /a2a proxy path; the runInSandbox arg is ignored.
+    const proxyUrl = `/a2a/${namespace}/${agentName}`;
 
     const response = await fetch(proxyUrl, {
       method: 'POST',

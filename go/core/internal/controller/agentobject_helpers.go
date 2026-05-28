@@ -21,17 +21,6 @@ func collectAgentRefs(items []v1alpha2.Agent, pred func(v1alpha2.AgentObject) bo
 	return out
 }
 
-func collectSandboxAgentRefs(items []v1alpha2.SandboxAgent, pred func(v1alpha2.AgentObject) bool) []types.NamespacedName {
-	var out []types.NamespacedName
-	for i := range items {
-		agent := &items[i]
-		if pred(agent) {
-			out = append(out, types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace})
-		}
-	}
-	return out
-}
-
 func reconcileRequestsForRefs(refs []types.NamespacedName) []reconcile.Request {
 	requests := make([]reconcile.Request, 0, len(refs))
 	for _, ref := range refs {

@@ -1,0 +1,29 @@
+---
+# Phase 2 live validation: a SandboxAgent that uses the Phase 0 dummy image
+# (which we've already proved substrate can golden-snapshot). BYO type so we
+# don't need a ModelConfig.
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: phase2-demo
+  namespace: kagent-substrate-poc
+spec:
+  type: BYO
+  byo:
+    deployment:
+      image: localhost:5001/substrate-poc-agent:p3
+      cmd: /usr/local/bin/uvicorn
+      args:
+        - agent:app
+        - --app-dir
+        - /app
+        - --host
+        - 0.0.0.0
+        - --port
+        - "80"
+        - --log-level
+        - info
+        - --loop
+        - asyncio
+        - --http
+        - h11

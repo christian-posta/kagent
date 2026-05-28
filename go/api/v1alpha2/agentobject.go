@@ -9,8 +9,31 @@ const (
 	WorkloadModeSandbox    WorkloadMode = "sandbox"
 )
 
-// AgentObject is the shared shape implemented by agent-style CRDs that expose the
-// same Spec/Status model but reconcile to different workload types.
+// defaultWorkloadMode is the fallback used when an Agent's spec.workloadMode
+// is unset. The controller binary calls SetDefaultWorkloadMode at startup
+// from its --default-workload-mode flag (helm value `defaultWorkloadMode`).
+var defaultWorkloadMode = WorkloadModeDeployment
+
+// SetDefaultWorkloadMode overrides the package-level default. Intended to be
+// called once at controller startup; never goroutine-safe.
+func SetDefaultWorkloadMode(mode WorkloadMode) {
+	switch mode {
+	case WorkloadModeDeployment, WorkloadModeSandbox:
+		defaultWorkloadMode = mode
+	}
+}
+
+// DefaultWorkloadMode returns the current package-level default. Mostly
+// useful for tests and for surfacing the active default in status messages.
+func DefaultWorkloadMode() WorkloadMode {
+	return defaultWorkloadMode
+}
+
+// AgentObject is the shared shape implemented by Agent. It remains an
+// interface because earlier versions of kagent shipped both `Agent` and
+// `SandboxAgent` CRDs; collapsing them is in progress, and downstream code
+// (translator, A2A registrar, substrate backend) still consumes the
+// interface even though there's only one implementor now.
 // +kubebuilder:object:generate=false
 type AgentObject interface {
 	client.Object
@@ -33,24 +56,15 @@ func (a *Agent) GetAgentStatus() *AgentStatus {
 	return &a.Status
 }
 
+// GetWorkloadMode returns this Agent's effective workload mode: the
+// explicit spec.workloadMode field if set, otherwise the package-level
+// default (controlled by --default-workload-mode at controller startup).
 func (a *Agent) GetWorkloadMode() WorkloadMode {
-	return WorkloadModeDeployment
-}
-
-func (a *SandboxAgent) GetAgentSpec() *AgentSpec {
 	if a == nil {
-		return nil
+		return defaultWorkloadMode
 	}
-	return &a.Spec
-}
-
-func (a *SandboxAgent) GetAgentStatus() *AgentStatus {
-	if a == nil {
-		return nil
+	if a.Spec.WorkloadMode != nil && *a.Spec.WorkloadMode != "" {
+		return *a.Spec.WorkloadMode
 	}
-	return &a.Status
-}
-
-func (a *SandboxAgent) GetWorkloadMode() WorkloadMode {
-	return WorkloadModeSandbox
+	return defaultWorkloadMode
 }

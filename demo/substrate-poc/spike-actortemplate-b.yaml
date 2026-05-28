@@ -1,0 +1,53 @@
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: spike-b-openclaw
+  namespace: kagent-substrate-poc
+  labels:
+    spike: "true"
+    spike-variant: "b-openclaw"
+spec:
+  pauseImage: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+  runsc:
+    amd64:
+      sha256Hash: a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63
+      url: gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc
+    arm64:
+      sha256Hash: 1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9
+      url: gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc
+    authentication: {}
+  containers:
+  - name: openclaw
+    image: localhost:5001/nemoclaw-sandbox-base:2026.5.4
+    command:
+    - /bin/sh
+    - -c
+    - |
+      set -e
+      mkdir -p "${HOME}/.openclaw"
+      cat > "${HOME}/.openclaw/openclaw.json" <<'EOF'
+      {
+        "gateway": {
+          "port": 80,
+          "bind": "lan",
+          "auth": {"mode": "token", "token": "test-token"},
+          "controlUi": {"allowedOrigins": ["*"], "dangerouslyDisableDeviceAuth": true}
+        }
+      }
+      EOF
+      openclaw gateway run --port 80 --allow-unconfigured >>/tmp/openclaw-gateway.log 2>&1 &
+      for i in $(seq 1 60); do
+        curl -sf http://127.0.0.1:80/ >/dev/null 2>&1 && echo "gateway up" && break
+        sleep 1
+      done
+      tail -f /tmp/openclaw-gateway.log /dev/null
+    env:
+    - name: HOME
+      value: /root
+    ports:
+    - containerPort: 80
+  workerPoolRef:
+    name: poc-pool
+    namespace: kagent-substrate-poc
+  snapshotsConfig:
+    location: gs://ate-snapshots/kagent-substrate-poc/spike-b-openclaw/

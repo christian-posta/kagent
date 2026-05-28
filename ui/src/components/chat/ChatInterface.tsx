@@ -19,7 +19,7 @@ import SessionTokenStatsDisplay from "@/components/chat/TokenStats";
 import type { TokenStats, Session, ChatStatus, ToolDecision } from "@/types";
 import StatusDisplay from "./StatusDisplay";
 import { createSession, getSessionTasks, checkSessionExists } from "@/app/actions/sessions";
-import { waitForSandboxAgentReady } from "@/app/actions/agents";
+import { waitForAgentReady } from "@/app/actions/agents";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 import { createMessageHandlers, extractMessagesFromTasks, extractApprovalMessagesFromTasks, extractTokenStatsFromTasks, createMessage, ADKMetadata, ProcessedToolCallData } from "@/lib/messageHandlers";
@@ -319,7 +319,7 @@ export default function ChatInterface({ selectedAgentName, selectedNamespace, se
           loadingToast = toast.loading("Starting sandbox workload…");
         }, 600);
         try {
-          const ready = await waitForSandboxAgentReady(selectedAgentName, selectedNamespace);
+          const ready = await waitForAgentReady(selectedAgentName, selectedNamespace);
           clearTimeout(slowToast);
           if (loadingToast !== undefined) toast.dismiss(loadingToast);
           if (!ready.ok) {

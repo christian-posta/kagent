@@ -57,6 +57,28 @@ data:
   STREAMING_TIMEOUT: {{ .Values.controller.streaming.timeout | quote }}
   WATCH_NAMESPACES: {{ include "kagent.watchNamespaces" . | quote }}
   ZAP_LOG_LEVEL: {{ .Values.controller.loglevel | quote }}
+  DEFAULT_WORKLOAD_MODE: {{ .Values.controller.defaultWorkloadMode | default "deployment" | quote }}
+  {{- if .Values.substrate.enabled }}
+  # Substrate sandbox backend. Setting SUBSTRATE_WORKER_POOL_NAME is the
+  # opt-in signal; the controller's app.LoadFromEnv maps each SUBSTRATE_*
+  # env var onto the equivalent --substrate-* flag.
+  SUBSTRATE_WORKER_POOL_NAME: {{ .Values.substrate.workerPoolName | quote }}
+  SUBSTRATE_WORKER_POOL_NAMESPACE: {{ .Values.substrate.workerPoolNamespace | quote }}
+  SUBSTRATE_WORKER_POOL_REPLICAS: {{ .Values.substrate.workerPoolReplicas | quote }}
+  {{- if .Values.substrate.workerPoolAteomImage }}
+  SUBSTRATE_WORKER_POOL_ATEOM_IMAGE: {{ .Values.substrate.workerPoolAteomImage | quote }}
+  {{- end }}
+  SUBSTRATE_CONTROL_ENDPOINT: {{ .Values.substrate.controlEndpoint | quote }}
+  SUBSTRATE_CONTROL_PLAINTEXT: {{ .Values.substrate.controlPlaintext | quote }}
+  SUBSTRATE_ROUTER_URL: {{ .Values.substrate.routerURL | quote }}
+  SUBSTRATE_SNAPSHOTS_LOCATION: {{ .Values.substrate.snapshotsLocation | quote }}
+  SUBSTRATE_PAUSE_IMAGE: {{ .Values.substrate.pauseImage | quote }}
+  {{- if .Values.substrate.agentImage }}
+  SUBSTRATE_AGENT_IMAGE: {{ .Values.substrate.agentImage | quote }}
+  {{- end }}
+  SUBSTRATE_IDLE_TIMEOUT: {{ .Values.substrate.idleTimeout | quote }}
+  SUBSTRATE_IDLE_SWEEP_INTERVAL: {{ .Values.substrate.idleSweepInterval | quote }}
+  {{- end }}
   {{- $agentHost := "" }}
   {{- if and .Values.controller.agentDeployment .Values.controller.agentDeployment.host (not (eq .Values.controller.agentDeployment.host "")) }}
   {{- $agentHost = .Values.controller.agentDeployment.host }}

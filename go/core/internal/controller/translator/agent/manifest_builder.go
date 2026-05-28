@@ -15,9 +15,11 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 )
 
@@ -32,6 +34,13 @@ type configSecretInputs struct {
 	configHash uint64
 	volumes    []corev1.Volume
 	mounts     []corev1.VolumeMount
+
+	// Raw JSON strings stuffed into the Secret. Surfaced separately so a
+	// sandbox backend that can't mount Secrets (substrate) can take the
+	// bytes directly and inject them as env vars on the workload container.
+	cfgJSON         string
+	agentCard       string
+	srtSettingsJSON string
 }
 
 type podRuntimeInputs struct {
@@ -74,7 +83,21 @@ func (a *adkApiTranslator) BuildManifest(
 
 	podTemplate := buildPodTemplate(manifestCtx, podRuntime, configSecret.configHash)
 
-	workloadObjects, err := a.buildWorkloadObjects(ctx, manifestCtx, podTemplate)
+	// Substrate's OCI bundle generator doesn't resolve `EnvVar.ValueFrom`
+	// (no FieldRef → downward-API, no SecretKeyRef → Secret lookup) — it
+	// just drops the value, so the kagent process inside the sandbox sees
+	// "KAGENT_NAMESPACE=" / "OPENAI_API_KEY=" and fails on startup. The
+	// kubelet does this resolution for normal Pods; in sandbox mode we
+	// have to do it ourselves before the env vars leave the kagent
+	// controller. Only mutates env when this PodTemplate is destined for
+	// a sandbox backend that needs plain Values.
+	if manifestCtx.runInSandbox() {
+		if err := a.resolveEnvForSandbox(ctx, manifestCtx.agent, &podTemplate); err != nil {
+			return nil, fmt.Errorf("resolve env vars for sandbox: %w", err)
+		}
+	}
+
+	workloadObjects, err := a.buildWorkloadObjects(ctx, manifestCtx, podTemplate, configSecret)
 	if err != nil {
 		return nil, err
 	}
@@ -184,9 +207,12 @@ func (a *adkApiTranslator) buildConfigSecret(
 			ObjectMeta: manifestCtx.objectMeta(),
 			StringData: buildConfigSecretData(cfgJSON, agentCard, srtSettingsJSON),
 		},
-		configHash: configHash,
-		volumes:    volumes,
-		mounts:     mounts,
+		configHash:      configHash,
+		volumes:         volumes,
+		mounts:          mounts,
+		cfgJSON:         cfgJSON,
+		agentCard:       agentCard,
+		srtSettingsJSON: srtSettingsJSON,
 	}, nil
 }
 
@@ -503,12 +529,23 @@ func (a *adkApiTranslator) buildWorkloadObjects(
 	ctx context.Context,
 	manifestCtx manifestContext,
 	podTemplate corev1.PodTemplateSpec,
+	configSecret *configSecretInputs,
 ) ([]client.Object, error) {
 	if manifestCtx.runInSandbox() {
-		sbObjs, err := a.sandboxBackend.BuildSandbox(ctx, sandboxbackend.BuildInput{
+		// Surface the raw config bytes alongside the PodTemplate. Backends
+		// whose target runtime can't mount Secrets at /config (substrate)
+		// pick these up and inject them as env vars; backends that mount
+		// the Secret directly (agentsxk8s) ignore them.
+		in := sandboxbackend.BuildInput{
 			Agent:       manifestCtx.agent,
 			PodTemplate: podTemplate,
-		})
+		}
+		if configSecret != nil {
+			in.ConfigJSON = configSecret.cfgJSON
+			in.AgentCardJSON = configSecret.agentCard
+			in.SRTSettingsJSON = configSecret.srtSettingsJSON
+		}
+		sbObjs, err := a.sandboxBackend.BuildSandbox(ctx, in)
 		if err != nil {
 			return nil, fmt.Errorf("build sandbox workload: %w", err)
 		}
@@ -557,5 +594,75 @@ func (a *adkApiTranslator) setManifestOwnerReferences(
 			return err
 		}
 	}
+	return nil
+}
+
+// resolveEnvForSandbox rewrites the primary container's env vars in place so
+// that any `ValueFrom` indirection (FieldRef downward-API; SecretKeyRef Secret
+// lookup) is replaced with a plain `Value`. Required for sandbox backends
+// (substrate) whose target runtime doesn't perform kubelet-style env
+// resolution and would otherwise hand the workload `OPENAI_API_KEY=""`.
+//
+// Supported FieldRef paths: `metadata.namespace`, `metadata.name`. Other
+// FieldRefs are dropped with a controller-log warning (the agent should
+// not depend on them in sandbox mode — they're a deployment-mode concern).
+//
+// SecretKeyRef is resolved by reading the referenced Secret in the agent's
+// namespace. Missing Secret / missing key fails the reconcile so the
+// SandboxAgent's Ready condition reports a useful error instead of
+// silently shipping an empty value.
+//
+// ConfigMapKeyRef and ResourceFieldRef are not currently used by kagent's
+// translator output; we skip them with a warning if encountered.
+func (a *adkApiTranslator) resolveEnvForSandbox(
+	ctx context.Context,
+	agent v1alpha2.AgentObject,
+	pt *corev1.PodTemplateSpec,
+) error {
+	log := ctrllog.FromContext(ctx).WithName("substrate-env-resolve")
+	if pt == nil || len(pt.Spec.Containers) == 0 {
+		return nil
+	}
+	envs := pt.Spec.Containers[0].Env
+	for i := range envs {
+		ev := &envs[i]
+		if ev.ValueFrom == nil {
+			continue
+		}
+		switch {
+		case ev.ValueFrom.FieldRef != nil:
+			path := ev.ValueFrom.FieldRef.FieldPath
+			switch path {
+			case "metadata.namespace":
+				ev.Value = agent.GetNamespace()
+			case "metadata.name":
+				ev.Value = agent.GetName()
+			default:
+				log.Info("dropping unsupported FieldRef in sandbox mode", "env", ev.Name, "fieldPath", path)
+			}
+			ev.ValueFrom = nil
+		case ev.ValueFrom.SecretKeyRef != nil:
+			ref := ev.ValueFrom.SecretKeyRef
+			sec := &corev1.Secret{}
+			nn := types.NamespacedName{Namespace: agent.GetNamespace(), Name: ref.Name}
+			if err := a.kube.Get(ctx, nn, sec); err != nil {
+				return fmt.Errorf("env %q references Secret %s/%s which can't be read: %w", ev.Name, nn.Namespace, nn.Name, err)
+			}
+			val, ok := sec.Data[ref.Key]
+			if !ok {
+				if ref.Optional != nil && *ref.Optional {
+					log.Info("optional SecretKeyRef missing; leaving env empty", "env", ev.Name, "secret", nn.String(), "key", ref.Key)
+				} else {
+					return fmt.Errorf("env %q references key %q in Secret %s, but the key is not present", ev.Name, ref.Key, nn.String())
+				}
+			}
+			ev.Value = string(val)
+			ev.ValueFrom = nil
+		case ev.ValueFrom.ConfigMapKeyRef != nil, ev.ValueFrom.ResourceFieldRef != nil:
+			log.Info("dropping ValueFrom kind not supported in sandbox mode", "env", ev.Name)
+			ev.ValueFrom = nil
+		}
+	}
+	pt.Spec.Containers[0].Env = envs
 	return nil
 }

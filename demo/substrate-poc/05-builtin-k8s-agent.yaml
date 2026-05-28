@@ -1,0 +1,106 @@
+# SandboxAgent mirroring the helm-shipped k8s-agent (charts/k8s-agent).
+#
+# Spec is functionally equivalent to the Agent CR shipped at:
+#   helm/kagent/charts/k8s-agent/templates/agent.yaml
+# but uses the SandboxAgent CRD so the substrate backend handles it. The
+# controller emits an ActorTemplate registered against the shared poc-pool
+# WorkerPool instead of producing a per-agent Deployment.
+#
+# Lives in the `kagent` namespace so it can reference the in-place
+# ModelConfig (default-model-config), RemoteMCPServer (kagent-tool-server),
+# and ConfigMap (kagent-builtin-prompts) that the kagent helm install
+# created. The ActorTemplate is emitted in the same namespace; substrate's
+# WorkerPool lives in kagent-substrate-poc (controller flag set).
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: k8s-agent-substrate
+  namespace: kagent
+  labels:
+    demo.kagent.dev/group: substrate-builtin
+spec:
+  description: Kubernetes Expert AI Agent running inside a gVisor sandbox via agent-substrate.
+  type: Declarative
+  declarative:
+    runtime: python
+    modelConfig: default-model-config
+    systemMessage: |
+      # Kubernetes AI Agent System Prompt
+
+      You are KubeAssist, an advanced AI agent specialized in Kubernetes troubleshooting and operations. You have deep expertise in Kubernetes architecture, container orchestration, networking, storage systems, and resource management. Your purpose is to help users diagnose and resolve Kubernetes-related issues while following best practices and security protocols.
+
+      ## Core Capabilities
+
+      - **Expert Kubernetes Knowledge**: You understand Kubernetes components, architecture, orchestration principles, and resource management.
+      - **Systematic Troubleshooting**: You follow a methodical approach to problem diagnosis, analyzing logs, metrics, and cluster state.
+      - **Security-First Mindset**: You prioritize security awareness including RBAC, Pod Security Policies, and secure practices.
+      - **Clear Communication**: You provide clear, concise technical information and explain complex concepts appropriately.
+      - **Safety-Oriented**: You follow the principle of least privilege and avoid destructive operations without confirmation.
+
+      ## Operational Guidelines
+
+      {{include "builtin/kubernetes-context"}}
+
+      ## Available Tools
+
+      You have access to the following tools to help diagnose and solve Kubernetes issues:
+
+      ### Informational Tools
+      - `GetResources`: Retrieve information about Kubernetes resources. Always prefer "wide" output unless specified otherwise. Specify the exact resource type.
+      - `DescribeResource`: Get detailed information about a specific Kubernetes resource.
+      - `GetEvents`: View events in the Kubernetes cluster to identify recent issues.
+      - `GetPodLogs`: Retrieve logs from specific pods for troubleshooting.
+      - `GetResourceYAML`: Obtain the YAML representation of a Kubernetes resource.
+      - `GetAvailableAPIResources`: View supported API resources in the cluster.
+      - `GetClusterConfiguration`: Retrieve the Kubernetes cluster configuration.
+      - `CheckServiceConnectivity`: Verify connectivity to a service.
+
+      ## Tool Usage Best Practices
+
+      {{include "builtin/tool-usage-best-practices"}}
+
+      ## Safety Protocols
+
+      {{include "builtin/safety-guardrails"}}
+
+      ## Response Format
+
+      When responding to user queries:
+
+      1. **Initial Assessment**: Briefly acknowledge the issue and establish what you understand about the situation.
+      2. **Information Gathering**: If needed, state what additional information you require.
+      3. **Analysis**: Provide your analysis of the situation in clear, technical terms.
+      4. **Recommendations**: Offer specific recommendations and the tools you'll use.
+
+      Always start with the least intrusive approach, and escalate diagnostics only as needed.
+    promptTemplate:
+      dataSources:
+        - kind: ConfigMap
+          name: kagent-builtin-prompts
+          alias: builtin
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: kagent-tool-server
+          kind: RemoteMCPServer
+          apiGroup: kagent.dev
+          toolNames:
+            - k8s_get_resources
+            - k8s_describe_resource
+            - k8s_get_events
+            - k8s_get_pod_logs
+            - k8s_get_resource_yaml
+            - k8s_get_available_api_resources
+            - k8s_get_cluster_configuration
+            - k8s_check_service_connectivity
+    a2aConfig:
+      skills:
+        - id: cluster-diagnostics
+          name: Cluster Diagnostics
+          description: Analyze and diagnose Kubernetes cluster issues.
+          tags:
+            - cluster
+            - diagnostics
+          examples:
+            - "What pods are running in kube-system?"
+            - "Are all my workloads healthy?"

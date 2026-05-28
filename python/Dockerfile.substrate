@@ -1,0 +1,39 @@
+# Substrate-flavored kagent app image.
+#
+# Differences from python/Dockerfile.app:
+#   - Adds a small shim entrypoint that materializes /tmp/config/{config.json,
+#     agent-card.json,srt-settings.json} from $KAGENT_CONFIG_JSON /
+#     $KAGENT_AGENT_CARD_JSON / $KAGENT_SRT_SETTINGS_JSON env vars before
+#     exec'ing kagent-adk. This sidesteps substrate's restricted
+#     ActorTemplate.spec.containers schema, which doesn't allow volume mounts.
+#   - Forces `kagent-adk static --local`. The agent process inside a substrate
+#     sandbox has no route back to the kagent controller's Service (the
+#     controller may even be running out-of-cluster for the PoC); --local
+#     swaps the controller-backed SessionService for an InMemorySessionService.
+#     Sessions don't persist across resume, which is fine for PoC.
+#
+# Build: invoked by `make build-substrate-app` (see Makefile).
+
+ARG KAGENT_ADK_VERSION=latest
+ARG DOCKER_REGISTRY=ghcr.io
+ARG DOCKER_REPO=kagent-dev/kagent
+FROM $DOCKER_REGISTRY/$DOCKER_REPO/kagent-adk:$KAGENT_ADK_VERSION
+
+ENV UV_OFFLINE=1
+
+# Copy the shim entrypoint. Keep it as root-readable so the unprivileged
+# python user (uid 1001 from the base image) can exec it.
+USER root
+COPY substrate-entrypoint.sh /usr/local/bin/substrate-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/substrate-entrypoint.sh
+USER python
+
+EXPOSE 8080
+ARG VERSION
+
+LABEL org.opencontainers.image.source=https://github.com/kagent-dev/kagent
+LABEL org.opencontainers.image.description="kagent app image with the substrate config-via-env shim entrypoint."
+LABEL org.opencontainers.image.version="$VERSION"
+
+ENTRYPOINT ["/usr/local/bin/substrate-entrypoint.sh"]
+CMD ["--host", "0.0.0.0", "--port", "80"]

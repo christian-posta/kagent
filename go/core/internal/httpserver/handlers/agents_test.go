@@ -62,14 +62,19 @@ func createTestAgentWithStatus(name string, modelConfig *v1alpha2.ModelConfig, c
 	return agent
 }
 
-func createTestSandboxAgentCRD(name string, modelConfig *v1alpha2.ModelConfig, conditions []metav1.Condition) *v1alpha2.SandboxAgent {
-	return &v1alpha2.SandboxAgent{
+// createTestSandboxModeAgent builds an Agent CR with workloadMode=sandbox.
+// After the SandboxAgent unification (SUBSTRATE.md §21) sandbox-mode is a
+// field on Agent, not a separate CRD.
+func createTestSandboxModeAgent(name string, modelConfig *v1alpha2.ModelConfig, conditions []metav1.Condition) *v1alpha2.Agent {
+	sandboxMode := v1alpha2.WorkloadModeSandbox
+	return &v1alpha2.Agent{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "default",
 		},
 		Spec: v1alpha2.AgentSpec{
-			Type: v1alpha2.AgentType_Declarative,
+			Type:         v1alpha2.AgentType_Declarative,
+			WorkloadMode: &sandboxMode,
 			Declarative: &v1alpha2.DeclarativeAgentSpec{
 				ModelConfig: modelConfig.Name,
 			},
@@ -231,21 +236,17 @@ func TestHandleGetAgent(t *testing.T) {
 		require.False(t, response.Data.DeploymentReady)
 	})
 
-	t.Run("returns 404 when only sandbox agent exists with that name", func(t *testing.T) {
+	t.Run("returns the sandbox-mode agent at the unified /api/agents path", func(t *testing.T) {
+		// Pre-unification this test asserted 404 because sandbox-mode agents
+		// were a separate CRD served by /api/sandboxagents. After SUBSTRATE.md
+		// §21 there's a single CRD and a single endpoint — sandbox-mode is
+		// discriminated by spec.workloadMode, not by which path you GET.
 		modelConfig := createTestModelConfig()
 		conditions := []metav1.Condition{
-			{
-				Type:   "Accepted",
-				Status: "True",
-				Reason: "AgentReconciled",
-			},
-			{
-				Type:   "Ready",
-				Status: "True",
-				Reason: "WorkloadReady",
-			},
+			{Type: "Accepted", Status: "True", Reason: "AgentReconciled"},
+			{Type: "Ready", Status: "True", Reason: "WorkloadReady"},
 		}
-		sa := createTestSandboxAgentCRD("sandbox-accepted", modelConfig, conditions)
+		sa := createTestSandboxModeAgent("sandbox-accepted", modelConfig, conditions)
 
 		handler, _ := setupTestHandler(t, sa, modelConfig)
 
@@ -256,7 +257,10 @@ func TestHandleGetAgent(t *testing.T) {
 
 		handler.HandleGetAgent(&testErrorResponseWriter{w}, req)
 
-		require.Equal(t, http.StatusNotFound, w.Code)
+		require.Equal(t, http.StatusOK, w.Code)
+		var response api.StandardResponse[api.AgentResponse]
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+		require.Equal(t, v1alpha2.WorkloadModeSandbox, response.Data.WorkloadMode)
 	})
 
 	t.Run("returns 404 for missing agent", func(t *testing.T) {
@@ -273,23 +277,27 @@ func TestHandleGetAgent(t *testing.T) {
 	})
 }
 
-func TestHandleGetSandboxAgent(t *testing.T) {
-	t.Run("gets sandbox agent successfully", func(t *testing.T) {
+// TestHandleGetSandboxModeAgent covers sandbox-mode Agent CRs via the
+// unified GET /api/agents/{ns}/{name} endpoint. The separate
+// /api/sandboxagents path was removed in the SandboxAgent unification
+// (SUBSTRATE.md §21).
+func TestHandleGetSandboxModeAgent(t *testing.T) {
+	t.Run("gets sandbox-mode agent successfully", func(t *testing.T) {
 		modelConfig := createTestModelConfig()
 		conditions := []metav1.Condition{
 			{Type: "Accepted", Status: "True", Reason: "AgentReconciled"},
 			{Type: "Ready", Status: "True", Reason: "WorkloadReady"},
 		}
-		sa := createTestSandboxAgentCRD("sandbox-accepted", modelConfig, conditions)
+		sa := createTestSandboxModeAgent("sandbox-accepted", modelConfig, conditions)
 
 		handler, _ := setupTestHandler(t, sa, modelConfig)
 
-		req := httptest.NewRequest("GET", "/api/sandboxagents/default/sandbox-accepted", nil)
+		req := httptest.NewRequest("GET", "/api/agents/default/sandbox-accepted", nil)
 		req = mux.SetURLVars(req, map[string]string{"namespace": "default", "name": "sandbox-accepted"})
 		req = setUser(req, "test-user")
 		w := httptest.NewRecorder()
 
-		handler.HandleGetSandboxAgent(&testErrorResponseWriter{w}, req)
+		handler.HandleGetAgent(&testErrorResponseWriter{w}, req)
 
 		require.Equal(t, http.StatusOK, w.Code)
 
@@ -298,26 +306,6 @@ func TestHandleGetSandboxAgent(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, response.Data.Accepted)
 		require.True(t, response.Data.DeploymentReady)
-		require.Equal(t, v1alpha2.WorkloadModeSandbox, response.Data.WorkloadMode)
-	})
-
-	t.Run("same name as regular agent still returns sandbox resource", func(t *testing.T) {
-		modelConfig := createTestModelConfig()
-		agent := createTestAgent("shared-name", modelConfig)
-		sa := createTestSandboxAgentCRD("shared-name", modelConfig, nil)
-		handler, _ := setupTestHandler(t, agent, sa, modelConfig)
-
-		req := httptest.NewRequest("GET", "/api/sandboxagents/default/shared-name", nil)
-		req = mux.SetURLVars(req, map[string]string{"namespace": "default", "name": "shared-name"})
-		req = setUser(req, "test-user")
-		w := httptest.NewRecorder()
-
-		handler.HandleGetSandboxAgent(&testErrorResponseWriter{w}, req)
-
-		require.Equal(t, http.StatusOK, w.Code)
-		var response api.StandardResponse[api.AgentResponse]
-		err := json.Unmarshal(w.Body.Bytes(), &response)
-		require.NoError(t, err)
 		require.Equal(t, v1alpha2.WorkloadModeSandbox, response.Data.WorkloadMode)
 	})
 }
@@ -430,13 +418,17 @@ func TestHandleListAgents(t *testing.T) {
 		require.Equal(t, true, response.Data[0].DeploymentReady)
 	})
 
-	t.Run("lists SandboxAgent CRD with Accepted and Ready from status", func(t *testing.T) {
+	t.Run("includes sandbox-mode agent in the unified /api/agents list", func(t *testing.T) {
+		// Pre-unification this test asserted the list was empty — because
+		// sandbox-mode CRs were served by a separate /api/sandboxagents
+		// endpoint. After SUBSTRATE.md §21 a single endpoint serves both
+		// modes, distinguished by spec.workloadMode.
 		modelConfig := createTestModelConfig()
 		conditions := []metav1.Condition{
 			{Type: "Accepted", Status: "True", Reason: "Reconciled"},
 			{Type: "Ready", Status: "True", Reason: "WorkloadReady"},
 		}
-		sa := createTestSandboxAgentCRD("mysandbox", modelConfig, conditions)
+		sa := createTestSandboxModeAgent("mysandbox", modelConfig, conditions)
 		handler, _ := setupTestHandler(t, sa, modelConfig)
 
 		req := httptest.NewRequest("GET", "/api/agents", nil)
@@ -450,7 +442,9 @@ func TestHandleListAgents(t *testing.T) {
 		var response api.StandardResponse[[]api.AgentResponse]
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		require.NoError(t, err)
-		require.Empty(t, response.Data)
+		require.Len(t, response.Data, 1)
+		require.Equal(t, "mysandbox", response.Data[0].Agent.Metadata.Name)
+		require.Equal(t, v1alpha2.WorkloadModeSandbox, response.Data[0].WorkloadMode)
 	})
 
 	t.Run("includes openshell AgentHarness CR in agent list", func(t *testing.T) {
@@ -502,62 +496,41 @@ func TestHandleListAgents(t *testing.T) {
 	})
 }
 
-func TestHandleListSandboxAgents(t *testing.T) {
-	t.Run("lists sandbox agents successfully", func(t *testing.T) {
+// TestHandleListAgents_SandboxMode verifies that the unified
+// /api/agents list endpoint returns both deployment-mode and sandbox-mode
+// Agents with the correct WorkloadMode discriminator. Replaces the
+// pre-unification TestHandleListSandboxAgents which queried the separate
+// /api/sandboxagents endpoint (removed in SUBSTRATE.md §21).
+func TestHandleListAgents_SandboxMode(t *testing.T) {
+	t.Run("lists both deployment-mode and sandbox-mode agents", func(t *testing.T) {
 		modelConfig := createTestModelConfig()
 		conditions := []metav1.Condition{
 			{Type: "Accepted", Status: "True", Reason: "Reconciled"},
 			{Type: "Ready", Status: "True", Reason: "WorkloadReady"},
 		}
-		sa := createTestSandboxAgentCRD("mysandbox", modelConfig, conditions)
+		sa := createTestSandboxModeAgent("mysandbox", modelConfig, conditions)
 		agent := createTestAgent("myagent", modelConfig)
 		handler, _ := setupTestHandler(t, sa, agent, modelConfig)
 
-		req := httptest.NewRequest("GET", "/api/sandboxagents", nil)
+		req := httptest.NewRequest("GET", "/api/agents", nil)
 		req = setUser(req, "test-user")
 		w := httptest.NewRecorder()
 
-		handler.HandleListSandboxAgents(&testErrorResponseWriter{w}, req)
+		handler.HandleListAgents(&testErrorResponseWriter{w}, req)
 
 		require.Equal(t, http.StatusOK, w.Code)
 
 		var response api.StandardResponse[[]api.AgentResponse]
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		require.NoError(t, err)
-		require.Len(t, response.Data, 1)
-		require.Equal(t, "mysandbox", response.Data[0].Agent.Metadata.Name)
-		require.True(t, response.Data[0].Accepted)
-		require.True(t, response.Data[0].DeploymentReady)
-		require.Equal(t, v1alpha2.WorkloadModeSandbox, response.Data[0].WorkloadMode)
-	})
+		require.Len(t, response.Data, 2)
 
-	t.Run("same names across kinds are both preserved by separate list endpoints", func(t *testing.T) {
-		modelConfig := createTestModelConfig()
-		agent := createTestAgent("shared-name", modelConfig)
-		sa := createTestSandboxAgentCRD("shared-name", modelConfig, nil)
-		handler, _ := setupTestHandler(t, agent, sa, modelConfig)
-
-		agentReq := httptest.NewRequest("GET", "/api/agents", nil)
-		agentReq = setUser(agentReq, "test-user")
-		agentW := httptest.NewRecorder()
-		handler.HandleListAgents(&testErrorResponseWriter{agentW}, agentReq)
-
-		sandboxReq := httptest.NewRequest("GET", "/api/sandboxagents", nil)
-		sandboxReq = setUser(sandboxReq, "test-user")
-		sandboxW := httptest.NewRecorder()
-		handler.HandleListSandboxAgents(&testErrorResponseWriter{sandboxW}, sandboxReq)
-
-		require.Equal(t, http.StatusOK, agentW.Code)
-		require.Equal(t, http.StatusOK, sandboxW.Code)
-
-		var agentResp api.StandardResponse[[]api.AgentResponse]
-		var sandboxResp api.StandardResponse[[]api.AgentResponse]
-		require.NoError(t, json.Unmarshal(agentW.Body.Bytes(), &agentResp))
-		require.NoError(t, json.Unmarshal(sandboxW.Body.Bytes(), &sandboxResp))
-		require.Len(t, agentResp.Data, 1)
-		require.Len(t, sandboxResp.Data, 1)
-		require.Equal(t, v1alpha2.WorkloadModeDeployment, agentResp.Data[0].WorkloadMode)
-		require.Equal(t, v1alpha2.WorkloadModeSandbox, sandboxResp.Data[0].WorkloadMode)
+		modes := map[string]v1alpha2.WorkloadMode{}
+		for _, a := range response.Data {
+			modes[a.Agent.Metadata.Name] = a.WorkloadMode
+		}
+		require.Equal(t, v1alpha2.WorkloadModeSandbox, modes["mysandbox"])
+		require.Equal(t, v1alpha2.WorkloadModeDeployment, modes["myagent"])
 	})
 }
 
@@ -762,26 +735,6 @@ func TestHandleDeleteTeam(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 
-	t.Run("does not delete sandbox agent with same name", func(t *testing.T) {
-		modelConfig := createTestModelConfig()
-		agent := createTestAgent("shared-name", modelConfig)
-		sa := createTestSandboxAgentCRD("shared-name", modelConfig, nil)
-		handler, _ := setupTestHandler(t, agent, sa, modelConfig)
-
-		req := httptest.NewRequest("DELETE", "/api/agents/default/shared-name", nil)
-		req = mux.SetURLVars(req, map[string]string{"namespace": "default", "name": "shared-name"})
-		req = setUser(req, "test-user")
-		w := httptest.NewRecorder()
-
-		handler.HandleDeleteAgent(&testErrorResponseWriter{w}, req)
-
-		require.Equal(t, http.StatusOK, w.Code)
-
-		var stillThere v1alpha2.SandboxAgent
-		err := handler.KubeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "shared-name"}, &stillThere)
-		require.NoError(t, err)
-	})
-
 	t.Run("deletes openshell AgentHarness when no Agent with that name", func(t *testing.T) {
 		sb := &v1alpha2.AgentHarness{
 			ObjectMeta: metav1.ObjectMeta{Name: "sb-only", Namespace: "default"},
@@ -801,23 +754,6 @@ func TestHandleDeleteTeam(t *testing.T) {
 		err := handler.KubeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "sb-only"}, sb)
 		require.Error(t, err)
 		require.True(t, apierrors.IsNotFound(err))
-	})
-}
-
-func TestHandleDeleteSandboxAgent(t *testing.T) {
-	t.Run("deletes sandbox agent successfully", func(t *testing.T) {
-		modelConfig := createTestModelConfig()
-		sa := createTestSandboxAgentCRD("test-sandbox", modelConfig, nil)
-		handler, _ := setupTestHandler(t, sa, modelConfig)
-
-		req := httptest.NewRequest("DELETE", "/api/sandboxagents/default/test-sandbox", nil)
-		req = mux.SetURLVars(req, map[string]string{"namespace": "default", "name": "test-sandbox"})
-		req = setUser(req, "test-user")
-		w := httptest.NewRecorder()
-
-		handler.HandleDeleteSandboxAgent(&testErrorResponseWriter{w}, req)
-
-		require.Equal(t, http.StatusOK, w.Code)
 	})
 }
 

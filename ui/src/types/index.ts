@@ -275,16 +275,13 @@ export interface SkillForAgent {
   gitRefs?: GitRepo[];
 }
 
-/** Kubernetes SandboxAgent CRD (kagent.dev/v1alpha2). Spec matches Agent.spec (AgentSpec). */
-export interface SandboxAgent {
-  apiVersion?: string;
-  kind?: string;
-  metadata: ResourceMetadata;
-  spec: AgentSpec;
-}
+/** Per-agent runtime mode. See SUBSTRATE.md §21. */
+export type WorkloadMode = "deployment" | "sandbox";
 
 export interface AgentSpec {
   type: AgentType;
+  /** Optional override for the chart-level default workload mode. */
+  workloadMode?: WorkloadMode;
   declarative?: DeclarativeAgentSpec;
   byo?: BYOAgentSpec;
   description: string;

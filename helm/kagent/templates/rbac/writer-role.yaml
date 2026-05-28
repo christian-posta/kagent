@@ -3,7 +3,6 @@
   - kagent.dev
   resources:
   - agents
-  - sandboxagents
   - agentharnesses
   - modelconfigs
   - modelproviderconfigs
@@ -20,7 +19,6 @@
   - kagent.dev
   resources:
   - agents/finalizers
-  - sandboxagents/finalizers
   - agentharnesses/finalizers
   - modelconfigs/finalizers
   - modelproviderconfigs/finalizers
@@ -75,6 +73,18 @@
   - update
   - patch
   - delete
+{{- if .Values.substrate.enabled }}
+- apiGroups:
+  - ate.dev
+  resources:
+  - workerpools
+  - actortemplates
+  verbs:
+  - create
+  - update
+  - patch
+  - delete
+{{- end }}
 {{- end -}}
 
 {{- include "kagent.rbac.validate" . -}}

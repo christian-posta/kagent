@@ -1,0 +1,23 @@
+---
+# Substrate-side infrastructure shared by every demo agent.
+#
+# Only the Namespace is declared here. The WorkerPool is now auto-provisioned
+# by the kagent controller's WorkerPoolEnsurer (B2 work). The Makefile's
+# demo-substrate-controller target passes:
+#
+#   --substrate-worker-pool-name=poc-pool
+#   --substrate-worker-pool-namespace=kagent-substrate-poc
+#   --substrate-worker-pool-replicas=2
+#   --substrate-worker-pool-ateom-image=<configured>
+#
+# At controller startup the ensurer creates the WorkerPool if missing and
+# patches its ateomImage if the flag drifts. The operator can still scale
+# `spec.replicas` manually — the ensurer leaves that field alone after
+# creation.
+#
+# The ActorTemplate per agent is emitted by the substrate backend's
+# BuildSandbox; no manual ActorTemplate here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kagent-substrate-poc

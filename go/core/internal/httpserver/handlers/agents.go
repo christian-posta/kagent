@@ -68,29 +68,6 @@ func (h *AgentsHandler) HandleListAgents(w ErrorResponseWriter, r *http.Request)
 	RespondWithJSON(w, http.StatusOK, data)
 }
 
-// HandleListSandboxAgents handles GET /api/sandboxagents requests using database.
-func (h *AgentsHandler) HandleListSandboxAgents(w ErrorResponseWriter, r *http.Request) {
-	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "list-sandboxagents")
-
-	if err := Check(h.Authorizer, r, auth.Resource{Type: "Agent"}); err != nil {
-		w.RespondWithError(err)
-		return
-	}
-
-	sandboxAgentList := &v1alpha2.SandboxAgentList{}
-	if err := h.KubeClient.List(r.Context(), sandboxAgentList); err != nil {
-		w.RespondWithError(errors.NewInternalServerError("Failed to list SandboxAgents from Kubernetes", err))
-		return
-	}
-
-	agentsWithID := make([]api.AgentResponse, 0)
-	h.appendAgentResponses(r.Context(), log, sandboxAgentObjects(sandboxAgentList.Items), &agentsWithID)
-
-	log.Info("Successfully listed sandbox agents", "count", len(agentsWithID))
-	data := api.NewResponse(agentsWithID, "Successfully listed sandbox agents", false)
-	RespondWithJSON(w, http.StatusOK, data)
-}
-
 func (h *AgentsHandler) appendAgentResponses(
 	ctx context.Context,
 	log logr.Logger,
@@ -180,14 +157,6 @@ func agentObjects(items []v1alpha2.Agent) []v1alpha2.AgentObject {
 	return out
 }
 
-func sandboxAgentObjects(items []v1alpha2.SandboxAgent) []v1alpha2.AgentObject {
-	out := make([]v1alpha2.AgentObject, 0, len(items))
-	for i := range items {
-		out = append(out, &items[i])
-	}
-	return out
-}
-
 func (h *AgentsHandler) getAgentResponse(ctx context.Context, log logr.Logger, agent v1alpha2.AgentObject) (api.AgentResponse, error) {
 	agentRef := utils.GetObjectRef(agent)
 	log.V(1).Info("Processing Agent", "agentRef", agentRef)
@@ -262,7 +231,12 @@ func (h *AgentsHandler) buildTranslator(kubeClient client.Client) agent_translat
 
 func (h *AgentsHandler) validateAgentObject(ctx context.Context, agent v1alpha2.AgentObject) error {
 	if agent.GetWorkloadMode() == v1alpha2.WorkloadModeSandbox && h.SandboxBackend != nil {
-		if err := sandboxbackend.EnsureAgentSandboxAPIsRegistered(ctx, h.KubeClient); err != nil {
+		// Probe the active backend's owned-resource types instead of the
+		// hardcoded agents.x-k8s.io/v1alpha1/Sandbox check. The substrate
+		// backend owns ate.dev/ActorTemplate, not agent-sandbox; the legacy
+		// preflight would refuse every SandboxAgent create on a
+		// substrate-only cluster.
+		if err := sandboxbackend.EnsureSandboxBackendAPIsRegistered(ctx, h.KubeClient, h.SandboxBackend); err != nil {
 			return errors.NewBadRequestError(err.Error(), err)
 		}
 	}
@@ -552,12 +526,6 @@ func (h *AgentsHandler) HandleGetAgent(w ErrorResponseWriter, r *http.Request) {
 	h.handleGetAgentObject(w, r, log, &v1alpha2.Agent{}, "Agent not found", "Successfully retrieved agent")
 }
 
-// HandleGetSandboxAgent handles GET /api/sandboxagents/{namespace}/{name} requests.
-func (h *AgentsHandler) HandleGetSandboxAgent(w ErrorResponseWriter, r *http.Request) {
-	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "get-sandboxagent")
-	h.handleGetAgentObject(w, r, log, &v1alpha2.SandboxAgent{}, "SandboxAgent not found", "Successfully retrieved sandbox agent")
-}
-
 // HandleCreateAgent handles POST /api/agents requests using database
 func (h *AgentsHandler) HandleCreateAgent(w ErrorResponseWriter, r *http.Request) {
 	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "create-db")
@@ -657,15 +625,6 @@ func (h *AgentsHandler) HandleDeleteAgent(w ErrorResponseWriter, r *http.Request
 	RespondWithJSON(w, http.StatusOK, api.NewResponse(struct{}{}, "Successfully deleted agent", false))
 }
 
-func normalizeSandboxAgentForAPI(sa *v1alpha2.SandboxAgent) {
-	if sa == nil {
-		return
-	}
-	if sa.Spec.Type == "" {
-		sa.Spec.Type = v1alpha2.AgentType_Declarative
-	}
-}
-
 // HandleCreateAgentHarness handles POST /api/agentharnesses requests (kagent.dev/v1alpha2 AgentHarness — OpenClaw/NemoClaw VM, etc.).
 func (h *AgentsHandler) HandleCreateAgentHarness(w ErrorResponseWriter, r *http.Request) {
 	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "create-agentharness")
@@ -705,60 +664,3 @@ func (h *AgentsHandler) HandleCreateAgentHarness(w ErrorResponseWriter, r *http.
 	respondWithObjectResponse(w, http.StatusCreated, resp, "Successfully created AgentHarness")
 }
 
-// HandleCreateSandboxAgent handles POST /api/sandboxagents requests.
-func (h *AgentsHandler) HandleCreateSandboxAgent(w ErrorResponseWriter, r *http.Request) {
-	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "create-sandboxagent")
-	h.handleCreateAgentObject(
-		w,
-		r,
-		log,
-		&v1alpha2.SandboxAgent{},
-		"Invalid sandboxagent metadata",
-		"Successfully created sandbox agent",
-		func(agent v1alpha2.AgentObject) {
-			normalizeSandboxAgentForAPI(agent.(*v1alpha2.SandboxAgent))
-		},
-		func(ctx context.Context, log logr.Logger, agent v1alpha2.AgentObject) (any, error) {
-			return h.getAgentResponse(ctx, log, agent)
-		},
-	)
-}
-
-// HandleUpdateSandboxAgent handles PUT /api/sandboxagents/{namespace}/{name} requests.
-func (h *AgentsHandler) HandleUpdateSandboxAgent(w ErrorResponseWriter, r *http.Request) {
-	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "update-sandboxagent")
-	h.handleUpdateAgentObject(
-		w,
-		r,
-		log,
-		&v1alpha2.SandboxAgent{},
-		&v1alpha2.SandboxAgent{},
-		"Invalid SandboxAgent metadata",
-		"Failed to get SandboxAgent",
-		"Failed to update SandboxAgent",
-		"SandboxAgent not found",
-		"Successfully updated sandbox agent",
-		func(agent v1alpha2.AgentObject) {
-			normalizeSandboxAgentForAPI(agent.(*v1alpha2.SandboxAgent))
-		},
-		true,
-		func(ctx context.Context, log logr.Logger, agent v1alpha2.AgentObject) (any, error) {
-			return h.getAgentResponse(ctx, log, agent)
-		},
-	)
-}
-
-// HandleDeleteSandboxAgent handles DELETE /api/sandboxagents/{namespace}/{name} requests.
-func (h *AgentsHandler) HandleDeleteSandboxAgent(w ErrorResponseWriter, r *http.Request) {
-	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "delete-sandboxagent")
-	h.handleDeleteAgentObject(
-		w,
-		r,
-		log,
-		&v1alpha2.SandboxAgent{},
-		"SandboxAgent not found",
-		"Failed to get SandboxAgent",
-		"Failed to delete SandboxAgent",
-		"Successfully deleted sandbox agent",
-	)
-}

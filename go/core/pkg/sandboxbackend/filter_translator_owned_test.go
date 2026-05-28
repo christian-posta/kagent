@@ -41,8 +41,12 @@ func TestFilterTranslatorOwnedTypesForList(t *testing.T) {
 		require.Len(t, out, 2)
 	})
 
-	t.Run("SandboxAgent keeps sandbox GVKs", func(t *testing.T) {
-		sa := &v1alpha2.SandboxAgent{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "ns"}}
+	t.Run("sandbox-mode Agent keeps sandbox GVKs", func(t *testing.T) {
+		sandboxMode := v1alpha2.WorkloadModeSandbox
+		sa := &v1alpha2.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "ns"},
+			Spec:       v1alpha2.AgentSpec{WorkloadMode: &sandboxMode},
+		}
 		out, err := sandboxbackend.FilterTranslatorOwnedTypesForList(cl, sa, allTypes, backend)
 		require.NoError(t, err)
 		require.Len(t, out, len(allTypes))

@@ -13563,6 +13563,21 @@ spec:
                 default: Declarative
                 description: AgentType represents the agent type
                 type: string
+              workloadMode:
+                description: |-
+                  WorkloadMode selects how the controller materializes this Agent at
+                  runtime. "deployment" emits a per-agent Deployment+Service via the
+                  configured deployment backend (the default). "sandbox" routes the
+                  Agent through the active sandbox backend (e.g. agent-substrate),
+                  producing an ActorTemplate plus on-demand resume; no per-agent Pod
+                  exists at rest.
+
+                  Unset → falls back to the controller's --default-workload-mode flag
+                  (chart value `defaultWorkloadMode`).
+                enum:
+                - deployment
+                - sandbox
+                type: string
             required:
             - type
             type: object

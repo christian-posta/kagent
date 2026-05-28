@@ -57,6 +57,38 @@ def static(
     workers: int = 1,
     filepath: str = "/config",
     reload: Annotated[bool, typer.Option("--reload")] = False,
+    local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help=(
+                "Use the in-memory session service instead of the kagent controller's HTTP API. "
+                "Set this when the controller isn't reachable from the agent's network (e.g. when running "
+                "inside a sandbox that has no route back to the controller, or for offline local testing)."
+            ),
+        ),
+    ] = False,
+    loop: Annotated[
+        str,
+        typer.Option(
+            "--loop",
+            help=(
+                "Uvicorn event loop implementation. Use 'asyncio' (instead of the default 'auto' which "
+                "picks uvloop) when running inside a gVisor sandbox that needs the process to be "
+                "checkpoint/restore-compatible — uvloop's epoll/eventfd usage has been a sore spot."
+            ),
+        ),
+    ] = "auto",
+    http: Annotated[
+        str,
+        typer.Option(
+            "--http",
+            help=(
+                "Uvicorn HTTP protocol implementation. Use 'h11' (pure Python) instead of the default "
+                "'auto' (httptools, C-extension) for the same checkpoint-restore reason as --loop."
+            ),
+        ),
+    ] = "auto",
 ):
     app_cfg = KAgentConfig()
 
@@ -95,7 +127,17 @@ def static(
         agent_config=agent_config,
     )
 
-    server = kagent_app.build()
+    if local:
+        logger.info("Running in local mode with InMemorySessionService (no kagent controller required)")
+        server = kagent_app.build(local=True)
+        # In --local mode we assume the agent is running inside a substrate
+        # sandbox (the only reason to use --local). Install the
+        # checkpoint-friendly httpx-pool-close hook so substrate's IdleSuspender
+        # can re-checkpoint after request handling. See SUBSTRATE.md §19.
+        from . import _substrate_checkpoint_friendly
+        _substrate_checkpoint_friendly.install(server)
+    else:
+        server = kagent_app.build()
     configure_tracing(app_cfg.name, app_cfg.namespace, server)
 
     uvicorn.run(
@@ -105,6 +147,8 @@ def static(
         workers=workers,
         reload=reload,
         log_level=uvicorn_log_level,
+        loop=loop,
+        http=http,
     )
 
 

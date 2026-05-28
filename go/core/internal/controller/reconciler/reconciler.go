@@ -47,9 +47,20 @@ const (
 	AgentReadyReasonWorkloadReady   = "WorkloadReady"
 )
 
+// sandboxAgentFinalizer keeps a sandbox-mode Agent alive past
+// `kubectl delete` until the active sandbox backend has cleaned up its
+// external resources (the substrate actor record in particular — see
+// DeletingBackend in go/core/pkg/sandboxbackend/backend.go). Only
+// installed when (a) the Agent's effective workloadMode is sandbox AND
+// (b) the active backend implements sandboxbackend.DeletingBackend.
+//
+// Name retains the substrate-actor suffix for historical continuity; it's
+// applied to deployment-mode Agents only if someone manually edits them
+// into sandbox mode and back.
+const sandboxAgentFinalizer = "kagent.dev/substrate-actor"
+
 type KagentReconciler interface {
 	ReconcileKagentAgent(ctx context.Context, req ctrl.Request) error
-	ReconcileKagentSandboxAgent(ctx context.Context, req ctrl.Request) error
 	ReconcileKagentModelConfig(ctx context.Context, req ctrl.Request) error
 	ReconcileKagentRemoteMCPServer(ctx context.Context, req ctrl.Request) error
 	ReconcileKagentMCPService(ctx context.Context, req ctrl.Request) error
@@ -92,6 +103,16 @@ func NewKagentReconciler(
 	}
 }
 
+// ReconcileKagentAgent is the unified dispatch path for Agent CRs. After the
+// SandboxAgent CRD removal (see SUBSTRATE.md §21), it handles both
+// deployment-mode and sandbox-mode agents in one place — the choice is
+// taken from agent.GetWorkloadMode() which reads spec.workloadMode (or the
+// controller's --default-workload-mode fallback).
+//
+// Sandbox-mode agents get a finalizer applied so the active backend's
+// external cleanup (e.g., substrate's actor record) runs before Kubernetes
+// garbage-collects the CR. Deployment-mode agents don't need this — child
+// Deployments/Services cascade via ownerReferences.
 func (a *kagentReconciler) ReconcileKagentAgent(ctx context.Context, req ctrl.Request) error {
 	agent := &v1alpha2.Agent{}
 	if err := a.kube.Get(ctx, req.NamespacedName, agent); err != nil {
@@ -99,6 +120,32 @@ func (a *kagentReconciler) ReconcileKagentAgent(ctx context.Context, req ctrl.Re
 			return a.handleDeletedAgentResource(ctx, req, "agent")
 		}
 		return fmt.Errorf("failed to get agent %s: %w", req.NamespacedName, err)
+	}
+
+	sandboxMode := agent.GetWorkloadMode() == v1alpha2.WorkloadModeSandbox
+	_, backendDeletes := a.sandboxBackend.(sandboxbackend.DeletingBackend)
+	needsFinalizer := sandboxMode && backendDeletes
+
+	// Deletion path: run backend OnDelete, then strip the finalizer so the
+	// CR can be GC'd. Only meaningful when the finalizer was added — for
+	// deployment-mode agents with no finalizer this is a no-op.
+	if !agent.DeletionTimestamp.IsZero() {
+		return a.finalizeAgent(ctx, agent)
+	}
+
+	// Ensure the finalizer is present when this Agent will produce external
+	// state. We patch in-band and continue the reconcile in the same pass.
+	// Early-returning would rely on the informer to re-trigger on the
+	// resourceVersion bump, but the Agent's event predicate filters
+	// metadata-only changes — the bump may never come back. Continuing is
+	// safe: subsequent Status updates go through the status subresource and
+	// don't conflict with the finalizer patch.
+	if needsFinalizer {
+		if controllerutil.AddFinalizer(agent, sandboxAgentFinalizer) {
+			if err := a.kube.Update(ctx, agent); err != nil {
+				return fmt.Errorf("add finalizer: %w", err)
+			}
+		}
 	}
 
 	err := a.reconcileAgent(ctx, agent)
@@ -109,21 +156,33 @@ func (a *kagentReconciler) ReconcileKagentAgent(ctx context.Context, req ctrl.Re
 	return a.reconcileAgentStatus(ctx, agent, err)
 }
 
-func (a *kagentReconciler) ReconcileKagentSandboxAgent(ctx context.Context, req ctrl.Request) error {
-	sandboxAgent := &v1alpha2.SandboxAgent{}
-	if err := a.kube.Get(ctx, req.NamespacedName, sandboxAgent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return a.handleDeletedAgentResource(ctx, req, "sandbox agent")
+// finalizeAgent invokes the active backend's OnDelete (if it implements
+// DeletingBackend) and removes our finalizer on success. If OnDelete fails
+// we return the error so controller-runtime requeues the Agent with
+// backoff — repeated failures will keep the CR in "Terminating" state.
+// Operators can break the cycle by `kubectl edit`ing the Agent and
+// removing the finalizer manually; in practice this shouldn't be needed
+// because DeleteActorSequenced has its own 5-minute deadline and treats
+// NotFound as success.
+//
+// No-op for deployment-mode agents that never had the finalizer added
+// (the ContainsFinalizer check returns early).
+func (a *kagentReconciler) finalizeAgent(ctx context.Context, agent *v1alpha2.Agent) error {
+	if !controllerutil.ContainsFinalizer(agent, sandboxAgentFinalizer) {
+		return nil
+	}
+	if dbk, ok := a.sandboxBackend.(sandboxbackend.DeletingBackend); ok && dbk != nil {
+		nn := types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}
+		if err := dbk.OnDelete(ctx, nn); err != nil {
+			reconcileLog.Error(err, "sandbox backend OnDelete failed; will retry", "agent", nn.String())
+			return fmt.Errorf("backend OnDelete: %w", err)
 		}
-		return fmt.Errorf("failed to get sandboxagent %s: %w", req.NamespacedName, err)
 	}
-
-	err := a.reconcileSandboxAgent(ctx, sandboxAgent)
-	if err != nil {
-		reconcileLog.Error(err, "failed to reconcile sandboxagent", "sandboxagent", req.NamespacedName)
+	controllerutil.RemoveFinalizer(agent, sandboxAgentFinalizer)
+	if err := a.kube.Update(ctx, agent); err != nil {
+		return fmt.Errorf("remove finalizer: %w", err)
 	}
-
-	return a.reconcileSandboxAgentStatus(ctx, sandboxAgent, err)
+	return nil
 }
 
 func (a *kagentReconciler) handleDeletedAgentResource(ctx context.Context, req ctrl.Request, resourceName string) error {
@@ -136,10 +195,16 @@ func (a *kagentReconciler) handleDeletedAgentResource(ctx context.Context, req c
 	return nil
 }
 
-func (a *kagentReconciler) reassignManifestOwnershipToSandboxAgent(sa *v1alpha2.SandboxAgent, manifest []client.Object) error {
+// reassignManifestOwnershipToAgent rewrites every object in the backend's
+// emitted manifest to be owned by the Agent CR. Required for sandbox-mode
+// reconciles because the substrate backend's BuildSandbox doesn't set
+// ownerReferences itself — it operates against a generic AgentObject and
+// doesn't know the concrete CRD type to point at. (Deployment-mode
+// agents don't need this; the deployment backend sets ownership directly.)
+func (a *kagentReconciler) reassignManifestOwnershipToAgent(agent *v1alpha2.Agent, manifest []client.Object) error {
 	for _, obj := range manifest {
 		obj.SetOwnerReferences(nil)
-		if err := controllerutil.SetControllerReference(sa, obj, a.kube.Scheme()); err != nil {
+		if err := controllerutil.SetControllerReference(agent, obj, a.kube.Scheme()); err != nil {
 			return fmt.Errorf("set controller reference for %s %s/%s: %w", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetNamespace(), obj.GetName(), err)
 		}
 	}
@@ -194,75 +259,54 @@ func (a *kagentReconciler) reconcileTranslatedAgent(
 	return nil
 }
 
-func (a *kagentReconciler) reconcileSandboxAgent(ctx context.Context, sa *v1alpha2.SandboxAgent) error {
-	if a.sandboxBackend != nil {
-		if err := sandboxbackend.EnsureAgentSandboxAPIsRegistered(ctx, a.kube); err != nil {
-			return err
-		}
-	}
-
-	return a.reconcileTranslatedAgent(ctx, sa, "sandboxagent", func(manifest []client.Object) error {
-		return a.reassignManifestOwnershipToSandboxAgent(sa, manifest)
-	})
-}
-
-func (a *kagentReconciler) reconcileSandboxAgentStatus(ctx context.Context, sa *v1alpha2.SandboxAgent, reconcileErr error) error {
-	deployedCondition := metav1.Condition{
-		Type:               v1alpha2.AgentConditionTypeReady,
-		Status:             metav1.ConditionUnknown,
-		ObservedGeneration: sa.Generation,
-	}
-
-	if a.sandboxBackend == nil {
-		deployedCondition.Status = metav1.ConditionUnknown
-		deployedCondition.Reason = "SandboxBackendNotConfigured"
-		deployedCondition.Message = "Sandbox backend is not configured"
-	} else {
-		st, reason, msg := a.sandboxBackend.ComputeReady(ctx, a.kube, types.NamespacedName{Namespace: sa.Namespace, Name: sa.Name})
-		deployedCondition.Status = st
-		deployedCondition.Reason = reason
-		deployedCondition.Message = msg
-		if st == metav1.ConditionTrue {
-			deployedCondition.Reason = AgentReadyReasonWorkloadReady
-		}
-	}
-
-	return a.updateAgentObjectStatus(ctx, sa, reconcileErr, deployedCondition)
-}
-
-func (a *kagentReconciler) reconcileAgentStatus(ctx context.Context, agent *v1alpha2.Agent, err error) error {
+// reconcileAgentStatus computes the Ready condition. Branches on
+// workloadMode: sandbox-mode delegates to the backend's ComputeReady;
+// deployment-mode polls the per-agent Deployment availability.
+func (a *kagentReconciler) reconcileAgentStatus(ctx context.Context, agent *v1alpha2.Agent, reconcileErr error) error {
 	deployedCondition := metav1.Condition{
 		Type:               v1alpha2.AgentConditionTypeReady,
 		Status:             metav1.ConditionUnknown,
 		ObservedGeneration: agent.Generation,
 	}
 
-	switch agent.Spec.Type {
-	default:
-		// Check if the deployment exists
-		deployment := &appsv1.Deployment{}
-		if err := a.kube.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, deployment); err != nil {
-			deployedCondition.Status = metav1.ConditionUnknown
-			deployedCondition.Reason = "DeploymentNotFound"
-			deployedCondition.Message = err.Error()
+	if agent.GetWorkloadMode() == v1alpha2.WorkloadModeSandbox {
+		if a.sandboxBackend == nil {
+			deployedCondition.Reason = "SandboxBackendNotConfigured"
+			deployedCondition.Message = "Sandbox backend is not configured"
 		} else {
-			replicas := int32(1)
-			if deployment.Spec.Replicas != nil {
-				replicas = *deployment.Spec.Replicas
+			st, reason, msg := a.sandboxBackend.ComputeReady(ctx, a.kube, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name})
+			deployedCondition.Status = st
+			deployedCondition.Reason = reason
+			deployedCondition.Message = msg
+			if st == metav1.ConditionTrue {
+				deployedCondition.Reason = AgentReadyReasonWorkloadReady
 			}
-			if deployment.Status.AvailableReplicas >= replicas {
-				deployedCondition.Status = metav1.ConditionTrue
-				deployedCondition.Reason = AgentReadyReasonDeploymentReady
-				deployedCondition.Message = "Deployment is ready"
-			} else {
-				deployedCondition.Status = metav1.ConditionFalse
-				deployedCondition.Reason = "DeploymentNotReady"
-				deployedCondition.Message = fmt.Sprintf("Deployment is not ready, %d/%d pods are ready", deployment.Status.AvailableReplicas, replicas)
-			}
+		}
+		return a.updateAgentObjectStatus(ctx, agent, reconcileErr, deployedCondition)
+	}
+
+	// Deployment-mode: check the per-agent Deployment availability.
+	deployment := &appsv1.Deployment{}
+	if err := a.kube.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, deployment); err != nil {
+		deployedCondition.Reason = "DeploymentNotFound"
+		deployedCondition.Message = err.Error()
+	} else {
+		replicas := int32(1)
+		if deployment.Spec.Replicas != nil {
+			replicas = *deployment.Spec.Replicas
+		}
+		if deployment.Status.AvailableReplicas >= replicas {
+			deployedCondition.Status = metav1.ConditionTrue
+			deployedCondition.Reason = AgentReadyReasonDeploymentReady
+			deployedCondition.Message = "Deployment is ready"
+		} else {
+			deployedCondition.Status = metav1.ConditionFalse
+			deployedCondition.Reason = "DeploymentNotReady"
+			deployedCondition.Message = fmt.Sprintf("Deployment is not ready, %d/%d pods are ready", deployment.Status.AvailableReplicas, replicas)
 		}
 	}
 
-	return a.updateAgentObjectStatus(ctx, agent, err, deployedCondition)
+	return a.updateAgentObjectStatus(ctx, agent, reconcileErr, deployedCondition)
 }
 
 func (a *kagentReconciler) updateAgentObjectStatus(ctx context.Context, agent v1alpha2.AgentObject, reconcileErr error, readyCondition metav1.Condition) error {
@@ -769,6 +813,20 @@ func (a *kagentReconciler) validateMcpServerReference(ctx context.Context, sourc
 }
 
 func (a *kagentReconciler) reconcileAgent(ctx context.Context, agent *v1alpha2.Agent) error {
+	if agent.GetWorkloadMode() == v1alpha2.WorkloadModeSandbox {
+		if a.sandboxBackend != nil {
+			// Each backend declares which CRDs it produces
+			// (GetOwnedResourceTypes); we probe those instead of hardcoding
+			// agent-sandbox kinds, so the check works for substrate-style
+			// backends too.
+			if err := sandboxbackend.EnsureSandboxBackendAPIsRegistered(ctx, a.kube, a.sandboxBackend); err != nil {
+				return err
+			}
+		}
+		return a.reconcileTranslatedAgent(ctx, agent, "agent", func(manifest []client.Object) error {
+			return a.reassignManifestOwnershipToAgent(agent, manifest)
+		})
+	}
 	return a.reconcileTranslatedAgent(ctx, agent, "agent", nil)
 }
 
@@ -938,13 +996,14 @@ func (a *kagentReconciler) deleteObjects(ctx context.Context, objects map[types.
 
 func (a *kagentReconciler) upsertAgent(ctx context.Context, agent v1alpha2.AgentObject, agentOutputs *agent_translator.AgentOutputs) error {
 	id := utils.ConvertToPythonIdentifier(utils.GetObjectRef(agent))
-	dbType := string(agent.GetAgentSpec().Type)
-	if agent.GetWorkloadMode() == v1alpha2.WorkloadModeSandbox {
-		dbType = "SandboxAgent"
-	}
 	dbAgent := &database.Agent{
-		ID:           id,
-		Type:         dbType,
+		ID: id,
+		// Type column tracks Declarative/BYO. Previously this was overwritten
+		// to "SandboxAgent" for sandbox-mode SandboxAgent CRs, which conflated
+		// agent type with workload runtime — fixed during the
+		// Agent+SandboxAgent unification (SUBSTRATE.md §21). The WorkloadType
+		// column still records sandbox vs deployment.
+		Type:         string(agent.GetAgentSpec().Type),
 		WorkloadType: agent.GetWorkloadMode(),
 		Config:       agentOutputs.Config,
 	}
@@ -956,10 +1015,10 @@ func (a *kagentReconciler) upsertAgent(ctx context.Context, agent v1alpha2.Agent
 	return nil
 }
 
+// agentKind returns the human-readable kind used in status messages.
+// After the SandboxAgent unification there's only one CRD; we keep the
+// helper for callsites that already use it.
 func agentKind(agent v1alpha2.AgentObject) string {
-	if agent.GetWorkloadMode() == v1alpha2.WorkloadModeSandbox {
-		return "SandboxAgent"
-	}
 	return "Agent"
 }
 

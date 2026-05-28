@@ -1,0 +1,105 @@
+# Helm values for the in-cluster kagent + substrate demo install.
+# Used by demo/substrate-poc/DEMO.md walkthrough.
+
+# Use the host-built controller image (tag must match the build steps in
+# DEMO.md). Built by:
+#   CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
+#       go -C go build -o /tmp/kagent-controller-substrate ./core/cmd/controller
+#   docker buildx build --push --platform linux/$(go env GOARCH) \
+#       --build-arg BINARY=binctx \
+#       -t localhost:5001/kagent-dev/kagent/controller:unified-agent \
+#       -f go/Dockerfile.substrate-demo /tmp
+controller:
+  # All Agent CRs default to sandbox mode in this install. After the
+  # Agent+SandboxAgent unification (SUBSTRATE.md §21) the runtime choice
+  # is a per-agent field (spec.workloadMode) with this chart value as the
+  # fallback. Override individual agents with workloadMode: deployment
+  # if you want them to run as a regular Deployment.
+  defaultWorkloadMode: sandbox
+  image:
+    registry: localhost:5001
+    repository: kagent-dev/kagent/controller
+    tag: unified-agent
+    pullPolicy: IfNotPresent
+  # Agent pod image (used for default Agent CRDs that still run as Deployments).
+  # Set to the substrate-shim variant so that if anyone applies an Agent CRD it
+  # still ships a working pod, though substrate-routed SandboxAgents pick up
+  # this image via the substrate.agentImage value below.
+  agentImage:
+    registry: localhost:5001
+    repository: kagent-dev/kagent/app-substrate
+    tag: dev
+    pullPolicy: IfNotPresent
+
+# OpenAI key for the default ModelConfig. Set via --set on the install command
+# so the key doesn't land in this file.
+providers:
+  default: openAI
+  openAI:
+    provider: OpenAI
+    model: "gpt-4o-mini"
+    apiKeySecretRef: kagent-openai
+    apiKeySecretKey: OPENAI_API_KEY
+    # apiKey injected via --set on install
+
+# Enable the substrate backend.
+substrate:
+  enabled: true
+  workerPoolName: poc-pool
+  workerPoolNamespace: kagent-substrate-poc
+  workerPoolReplicas: 2
+  workerPoolAteomImage: "localhost:5001/ateom-gvisor-34ef0400225d9f0582e4c906399c2137:latest"
+  controlEndpoint: "api.ate-system.svc.cluster.local:443"
+  controlPlaintext: false
+  routerURL: "http://atenet-router.ate-system.svc"
+  agentImage: "localhost:5001/kagent-dev/kagent/app-substrate:dev"
+  idleTimeout: 30s
+  idleSweepInterval: 10s
+
+# UI is optional. Set replicas: 0 to disable. When enabled, image must be
+# pre-pushed via `VERSION=unified-agent make build-ui`.
+ui:
+  replicas: 1
+  image:
+    registry: localhost:5001
+    repository: kagent-dev/kagent/ui
+    tag: unified-agent
+    pullPolicy: IfNotPresent
+oauth2-proxy:
+  enabled: false
+
+# Disable all built-in Agent CRs for the first run. We'll apply a SandboxAgent
+# clone of k8s-agent by hand to prove the substrate path. The agents below
+# require a working LLM key and additional MCP tool servers — turning them
+# off keeps the controller log clean during demo validation.
+k8s-agent:
+  enabled: false
+kgateway-agent:
+  enabled: false
+istio-agent:
+  enabled: false
+promql-agent:
+  enabled: false
+observability-agent:
+  enabled: false
+argo-rollouts-agent:
+  enabled: false
+helm-agent:
+  enabled: false
+cilium-policy-agent:
+  enabled: false
+cilium-manager-agent:
+  enabled: false
+cilium-debug-agent:
+  enabled: false
+grafana-mcp:
+  enabled: false
+querydoc:
+  enabled: false
+
+# kagent-tools (the kagent-tool-server with k8s MCP tools) stays enabled.
+# Default TOKEN_PASSTHROUGH=false → the server uses its own ServiceAccount
+# RBAC for kubectl calls, so unauthenticated MCP requests from inside the
+# gVisor sandbox succeed. See SUBSTRATE.md for the auth analysis.
+kagent-tools:
+  enabled: true

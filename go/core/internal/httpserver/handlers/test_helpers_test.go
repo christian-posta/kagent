@@ -23,8 +23,6 @@ func setupScheme() *runtime.Scheme {
 	)
 
 	s.AddKnownTypes(v1alpha2.GroupVersion,
-		&v1alpha2.SandboxAgent{},
-		&v1alpha2.SandboxAgentList{},
 		&v1alpha2.AgentHarness{},
 		&v1alpha2.AgentHarnessList{},
 	)
