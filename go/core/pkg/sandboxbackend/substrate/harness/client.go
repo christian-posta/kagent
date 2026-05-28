@@ -112,3 +112,23 @@ func (c *Client) DeleteActor(ctx context.Context, actorID string) error {
 	_, err := c.ControlClient.DeleteActor(ctx, &ateapipb.DeleteActorRequest{ActorId: actorID})
 	return err
 }
+
+func (c *Client) ListWorkers(ctx context.Context) ([]*ateapipb.Worker, error) {
+	ctx, cancel := c.callCtx(ctx)
+	defer cancel()
+	resp, err := c.ControlClient.ListWorkers(ctx, &ateapipb.ListWorkersRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetWorkers(), nil
+}
+
+func (c *Client) ListActors(ctx context.Context) ([]*ateapipb.Actor, error) {
+	ctx, cancel := c.callCtx(ctx)
+	defer cancel()
+	resp, err := c.ControlClient.ListActors(ctx, &ateapipb.ListActorsRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetActors(), nil
+}

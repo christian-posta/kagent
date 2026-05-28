@@ -455,6 +455,36 @@ the substrate path is identical: atenet → resume → real LLM →
 > substrate's restricted `ActorTemplate.spec.containers` can't carry —
 > see SUBSTRATE.md §13.
 
+## Substrate observability in the UI
+
+The UI ships a read-only **Substrate** page at `/substrate` (Header → View
+→ Substrate) that polls the controller every 2 s and renders two tables:
+
+- **Workers** — every worker pod backed by a gVisor sandbox, its pool, IP,
+  state (FREE/ASSIGNED), and which actor it currently hosts.
+- **Actors** — every registered actor with status (Running, Suspended,
+  Resuming, Suspending), its template, current worker pod, and last
+  snapshot URI. Running actors sort to the top.
+
+```bash
+# Direct API access (no UI required)
+kubectl port-forward -n kagent svc/kagent-controller 18093:8083 &
+curl -s http://localhost:18093/api/substrate/workers | jq
+curl -s http://localhost:18093/api/substrate/actors  | jq
+```
+
+The endpoints are only registered when the controller was started with
+`substrate.controlEndpoint` set (i.e. substrate is enabled). Without
+substrate they return HTTP 501. See SUBSTRATE.md §24 for the backend
+shape.
+
+To prove the live-update path, suspend a running actor in one terminal
+and watch the row flip Running → Suspending → Suspended in the UI:
+
+```bash
+kubectl ate suspend actor <actor-id>
+```
+
 ## Inspection cheat sheet
 
 ```bash
@@ -480,6 +510,52 @@ kubectl logs -n kagent-substrate-poc poc-pool-deployment-XXXXX     # ateom + wor
 kubectl logs -n ate-system deploy/ate-api-server-deployment        # substrate Control API
 kubectl logs -n ate-system ds/atelet                               # gVisor / runsc orchestration
 ```
+
+## Troubleshooting: actor wedged in Resuming / "actor is resuming"
+
+If the UI shows an AgentHarness as `Ready: False` with reason
+`ActorResuming` and the actor sits in `STATUS_RESUMING` forever (visible
+on the Substrate page and via `kubectl ate get actors`), one cause is
+a **corrupt instance snapshot** left over from a partial suspend.
+
+What happens: a Suspend RPC begins writing a new snapshot to rustfs, the
+worker pod recycles mid-write (or the Checkpoint workflow's context is
+canceled), and ate-api stores the new — incomplete — snapshot URI as the
+actor's `last_snapshot`. The previous good snapshot has been overwritten.
+Every Resume attempt now 404s on `pages_meta.img.zstd` because that file
+was never finalized. Look for this signature in atelet logs:
+
+```bash
+kubectl logs -n ate-system ds/atelet | grep -E "Restore.*err" | tail -5
+# ... NoSuchKey: The specified key does not exist
+# ... while downloading pages_meta.img.zstd from GCS ...
+```
+
+The actor will never recover. The actor record in valkey holds the dead
+snapshot pointer, suspend RPC rejects with `not suspended (status:
+STATUS_RESUMING)`, and delete RPC requires the actor be suspended.
+
+**Recovery** — recreate the AgentHarness under a new `metadata.name`:
+
+```bash
+# Force-clear the finalizer so the stuck CR can leave.
+kubectl delete agentharness -n <ns> <name> --wait=false
+kubectl patch agentharness -n <ns> <name> --type=merge \
+    -p '{"metadata":{"finalizers":[]}}'
+
+# Re-apply with a different name (actor ID is derived from
+# namespace+name, so a new name gets a fresh actor record in valkey
+# instead of inheriting the bricked one).
+sed 's/name: openclaw-test/name: openclaw-demo/' \
+    demo/substrate-poc/06-openclaw-harness.yaml | kubectl apply -f -
+```
+
+The orphan record (`ahr-<ns>-<old-name>`) stays in valkey but does
+nothing — no worker assignment, no traffic, no UI surface other than a
+Suspending/Resuming row on the Substrate page.
+
+Don't reuse the old name in the same install unless you've cleared
+substrate state (delete the kind cluster, or wipe valkey + rustfs).
 
 ## Teardown
 

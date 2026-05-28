@@ -17,6 +17,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/version"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
+	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/substrate/harness"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl_client "sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,6 +49,7 @@ const (
 	APIPathLangGraph            = "/api/langgraph"
 	APIPathCrewAI               = "/api/crewai"
 	APIPathSandboxSSH           = "/api/sandbox/ssh"
+	APIPathSubstrate            = "/api/substrate"
 )
 
 var defaultModelConfig = types.NamespacedName{
@@ -74,6 +76,12 @@ type ServerConfig struct {
 	// Required for browser access to openclaw VMs running in substrate
 	// actors. Lifted from pj-kagent.
 	AgentHarnessGateway *handlers.AgentHarnessGatewayConfig
+	// SubstrateHarnessClient, when non-nil, enables the read-only substrate
+	// observability endpoints at /api/substrate/{workers,actors}. Same
+	// client used by AgentHarnessGateway; supplied here separately so the
+	// observability routes can be registered independently if the gateway
+	// is disabled.
+	SubstrateHarnessClient *harness.Client
 }
 
 // HTTPServer is the structure that manages the HTTP server
@@ -91,6 +99,7 @@ func NewHTTPServer(config ServerConfig) (*HTTPServer, error) {
 
 	h := handlers.NewHandlers(config.KubeClient, defaultModelConfig, config.DbClient, config.WatchedNamespaces, config.Authorizer, config.ProxyURL, config.Reconciler, config.SandboxBackend)
 	h.AgentHarnessGateway = config.AgentHarnessGateway
+	h.Substrate = handlers.NewSubstrateHandler(config.SubstrateHarnessClient)
 	return &HTTPServer{
 		config:        config,
 		router:        config.Router,
@@ -309,6 +318,11 @@ func (s *HTTPServer) setupRoutes() {
 
 	// OpenShell sandbox PTY (browser WebSocket → gateway CONNECT → SSH). Authenticated like other /api routes.
 	s.router.HandleFunc(APIPathSandboxSSH, adaptHandler(s.handlers.HandleSandboxSSHWebSocket)).Methods(http.MethodGet)
+
+	// Substrate observability — read-only listings of workers + actors via
+	// ate-api Control RPCs. Endpoints return 501 when substrate is disabled.
+	s.router.HandleFunc(APIPathSubstrate+"/workers", adaptHandler(s.handlers.Substrate.HandleListWorkers)).Methods(http.MethodGet)
+	s.router.HandleFunc(APIPathSubstrate+"/actors", adaptHandler(s.handlers.Substrate.HandleListActors)).Methods(http.MethodGet)
 
 	// A2A — unified path for all Agent workload modes. Sandbox-mode agents
 	// previously had a parallel /api/a2a-sandboxes path; that's been

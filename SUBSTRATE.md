@@ -1740,3 +1740,73 @@ package layout); ~2500 LOC of new code.
 - `demo/substrate-poc/DEMO.md` — current walkthrough for all three paths.
 - `demo/substrate-poc/05-builtin-k8s-agent.yaml` — Declarative path.
 - `demo/substrate-poc/06-openclaw-harness.yaml` — AgentHarness path.
+
+## 24. Substrate observability endpoints + UI page (2026-05-28)
+
+The kagent controller now exposes two read-only endpoints that proxy
+substrate's `Control.ListWorkers` / `Control.ListActors` RPCs, plus a
+Next.js page that consumes them. Goal: surface the live state of the
+worker pool and the actors it hosts directly in the kagent UI, without
+needing `kubectl ate`.
+
+### Backend
+
+`go/core/internal/httpserver/handlers/substrate.go` defines
+`SubstrateHandler` with two methods:
+
+| Endpoint | Method | Payload |
+|---|---|---|
+| `/api/substrate/workers` | `GET` | `[]{workerNamespace, workerPool, workerPod, actorNamespace?, actorTemplate?, actorId?, ip, version}` |
+| `/api/substrate/actors`  | `GET` | `[]{actorId, version, actorTemplateNamespace?, actorTemplateName?, status, ateomPodNamespace?, ateomPodName?, ateomPodIp?, lastSnapshot?, inProgressSnapshot?}` |
+
+Both wrap responses in the standard `{error, data, message}` envelope
+(`api.NewResponse(...)`). Sort order is stable across polls — workers
+sort by namespace → pool → pod, actors by Running-first → template
+namespace/name → id. Without that the UI tables shuffle every refresh
+because substrate's RPCs return no defined order.
+
+The handlers return HTTP 501 (`NewNotImplementedError`) when the
+controller wasn't started with the substrate backend (`harness.Client`
+nil). Same gate as the AgentHarness gateway proxy — both share the
+`Client` instance hoisted to function scope in `app.go`.
+
+`harness.Client` gained `ListWorkers(ctx) ([]*Worker, error)` and
+`ListActors(ctx) ([]*Actor, error)` on top of the existing
+GetActor/CreateActor/ResumeActor/SuspendActor/DeleteActor methods.
+Both empty-request RPCs against `ateapi.Control`.
+
+### Frontend
+
+| File | Purpose |
+|---|---|
+| `ui/src/app/actions/substrate.ts` | Server actions calling the two endpoints, returning `BaseResponse<SubstrateWorker[]>` / `BaseResponse<SubstrateActor[]>`. |
+| `ui/src/app/substrate/page.tsx` | Client component polling both endpoints every 2 s via `setInterval`. Workers card first, Actors card second — small-display ordering preference: the "most relevant" actor info sits last so scroll-stop lands on it. |
+| `ui/src/components/Header.tsx` | New "Substrate" entry in the View dropdown (desktop + mobile), Boxes icon from lucide-react. |
+
+The page renders with `LoadingState` while the first fetch is in flight,
+then never blanks on subsequent errors — keeps the last good payload and
+shows the error inline next to the timestamp. That way a transient
+controller restart doesn't wipe the screen.
+
+### Wiring
+
+`ServerConfig` gained `SubstrateHarnessClient *harness.Client`; `app.go`
+declares `substrateHarnessClient` at function scope (was previously
+block-scoped inside the `substrateHarnessEnabled` branch) so the HTTP
+server can reuse the same dialed `harness.Client` the AgentHarness
+gateway already uses.
+
+### Trade-offs
+
+- **Polling, not push.** A websocket / SSE feed would scale better, but
+  the substrate Control API is unary RPC only. Polling every 2 s
+  against a local controller is cheap; the typical 6-actor / 3-worker
+  payload is < 2 KB.
+- **No filtering.** The endpoints return everything. If a tenancy
+  story lands, add `?namespace=` and have the handler intersect with
+  the caller's authz scope.
+- **Stale snapshot URIs.** The `lastSnapshot` field on a `Suspended`
+  actor can point at an unfinished snapshot in valkey if a prior
+  Suspend was canceled mid-write — see DEMO.md's troubleshooting
+  section on "actor wedged in Resuming". The UI just renders whatever
+  ate-api returns; it can't tell a valid snapshot from a broken one.

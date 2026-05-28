@@ -20,7 +20,12 @@ controller:
     registry: localhost:5001
     repository: kagent-dev/kagent/controller
     tag: unified-agent
-    pullPolicy: IfNotPresent
+    # Always re-pull from localhost:5001 so that `docker push` of a new
+    # build immediately reaches the next pod restart. Without this, kind's
+    # containerd caches the tag and a fresh `docker push` is ignored until
+    # the cache is manually purged. Trade-off is a registry round-trip on
+    # every pod start, which is cheap against a local registry.
+    pullPolicy: Always
   # Agent pod image (used for default Agent CRDs that still run as Deployments).
   # Set to the substrate-shim variant so that if anyone applies an Agent CRD it
   # still ships a working pod, though substrate-routed SandboxAgents pick up
@@ -64,7 +69,8 @@ ui:
     registry: localhost:5001
     repository: kagent-dev/kagent/ui
     tag: unified-agent
-    pullPolicy: IfNotPresent
+    # See controller.image.pullPolicy above for why this is Always.
+    pullPolicy: Always
 oauth2-proxy:
   enabled: false
 

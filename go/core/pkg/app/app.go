@@ -662,6 +662,10 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 	// runs when at least one is configured.
 	openshellHarnessEnabled := cfg.Openshell.GatewayURL != ""
 	substrateHarnessEnabled := cfg.Substrate.ControlEndpoint != "" && cfg.Substrate.WorkerPoolAteomImage != ""
+	// substrateHarnessClient is captured at function scope so the HTTPServer
+	// (built below) can reuse it for the /api/substrate observability
+	// endpoints. Nil when substrate isn't enabled.
+	var substrateHarnessClient *harness.Client
 	if openshellHarnessEnabled || substrateHarnessEnabled {
 		kubeClient := mgr.GetClient()
 		var openshellBackends map[v1alpha2.AgentHarnessBackendType]sandboxbackend.AsyncBackend
@@ -698,6 +702,7 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 				setupLog.Error(err, "unable to dial substrate Control API for harness backend")
 				os.Exit(1)
 			}
+			substrateHarnessClient = harnessClient
 			openClawBackend := harness.NewOpenClawBackend(harnessClient, harnessCfg, v1alpha2.AgentHarnessBackendOpenClaw, mgr.GetEventRecorderFor("agentharness-openclaw-substrate"))
 			substrateBackends = map[v1alpha2.AgentHarnessBackendType]sandboxbackend.AsyncBackend{
 				v1alpha2.AgentHarnessBackendOpenClaw: openClawBackend,
@@ -861,9 +866,10 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		Authorizer:          extensionCfg.Authorizer,
 		Authenticator:       extensionCfg.Authenticator,
 		ProxyURL:            cfg.Proxy.URL,
-		Reconciler:          rcnclr,
-		SandboxBackend:      extensionCfg.SandboxBackend,
-		AgentHarnessGateway: agentHarnessGatewayCfg,
+		Reconciler:             rcnclr,
+		SandboxBackend:         extensionCfg.SandboxBackend,
+		AgentHarnessGateway:    agentHarnessGatewayCfg,
+		SubstrateHarnessClient: substrateHarnessClient,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create HTTP server")

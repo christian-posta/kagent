@@ -37,6 +37,10 @@ type Handlers struct {
 	Checkpoints         *CheckpointsHandler
 	CrewAI              *CrewAIHandler
 	CurrentUser         *CurrentUserHandler
+	// Substrate exposes read-only observability for the substrate workers +
+	// actors. Set in server.go after construction so handlers.go has no
+	// build-time dep on the harness package.
+	Substrate *SubstrateHandler
 }
 
 // Base holds common dependencies for all handlers
