@@ -347,3 +347,15 @@ func (b *grpcBackend) execSandbox(ctx context.Context, sandboxID string, command
 	}
 	return exitCode, stderr.String(), nil
 }
+
+// OnAgentHarnessReady is a no-op for backends that don't need post-ready
+// bootstrap work. The openclaw flavor overrides this on its own type to
+// write ~/.openclaw/openclaw.json and start the gateway. Required to
+// satisfy the AsyncBackend interface after the PostReadyBackend interface
+// was merged in (see sandboxbackend/async.go).
+func (b *grpcBackend) OnAgentHarnessReady(ctx context.Context, ah *v1alpha2.AgentHarness, h sandboxbackend.Handle) error {
+	_ = ctx
+	_ = ah
+	_ = h
+	return nil
+}

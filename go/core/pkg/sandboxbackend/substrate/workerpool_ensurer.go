@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	substratev1 "github.com/agent-substrate/substrate/api/v1alpha1"
+	substratev1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"

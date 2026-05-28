@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	ateapipb "github.com/agent-substrate/substrate/proto/ateapipb"
+	ateapipb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

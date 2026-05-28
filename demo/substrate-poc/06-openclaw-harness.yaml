@@ -1,0 +1,39 @@
+apiVersion: kagent.dev/v1alpha2
+kind: AgentHarness
+metadata:
+  name: openclaw-test
+  namespace: kagent
+spec:
+  # New axis introduced for substrate-backed AgentHarness (lifted from
+  # pj-kagent). When runtime=substrate, the kagent controller dispatches to
+  # the substrate harness backend (Provisioner + AsyncBackend) instead of
+  # the openshell gateway-based backend.
+  runtime: substrate
+  # backend selects which workload runtime runs inside the substrate sandbox.
+  # Currently only "openclaw" is implemented for runtime=substrate.
+  backend: openclaw
+
+  description: OpenClaw on Agent Substrate
+  modelConfigRef: default-model-config
+
+  substrate:
+    # Where substrate stores golden + incremental snapshots. Defaults to
+    # gs://ate-snapshots/<namespace>/<name> when unset.
+    snapshotsConfig:
+      location: gs://ate-snapshots/kagent/openclaw-test/
+
+    # WorkerPool config: kagent auto-creates a per-harness WorkerPool in
+    # the harness namespace when workerPoolRef is not set. Replicas:1 is
+    # enough for the demo; production may want more for parallelism.
+    #
+    # `ateomImage` deliberately omitted: the harness Provisioner falls
+    # back to controller.substrate.workerPoolAteomImage in the helm values
+    # file, which points at substrate's reproducible ko-built tag
+    # (ateom-gvisor-34ef0400…:latest, populated by install-ate-kind.sh).
+    workerPool:
+      replicas: 1
+
+    # OpenClaw gateway authentication. Use gatewayToken (inline) for the
+    # demo; production should use gatewayTokenSecretRef pointing at a
+    # Secret containing a "token" key.
+    gatewayToken: test-token

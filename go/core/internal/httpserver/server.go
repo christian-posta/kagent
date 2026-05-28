@@ -57,18 +57,23 @@ var defaultModelConfig = types.NamespacedName{
 
 // ServerConfig holds the configuration for the HTTP server
 type ServerConfig struct {
-	Router            *mux.Router
-	BindAddr          string
-	KubeClient        ctrl_client.Client
-	A2AHandler        a2a.A2AHandlerMux
-	MCPHandler        *mcp.MCPHandler
-	WatchedNamespaces []string
-	DbClient          dbpkg.Client
-	Authenticator     auth.AuthProvider
-	Authorizer        auth.Authorizer
-	ProxyURL          string
-	Reconciler        reconciler.KagentReconciler
-	SandboxBackend    sandboxbackend.Backend
+	Router              *mux.Router
+	BindAddr            string
+	KubeClient          ctrl_client.Client
+	A2AHandler          a2a.A2AHandlerMux
+	MCPHandler          *mcp.MCPHandler
+	WatchedNamespaces   []string
+	DbClient            dbpkg.Client
+	Authenticator       auth.AuthProvider
+	Authorizer          auth.Authorizer
+	ProxyURL            string
+	Reconciler          reconciler.KagentReconciler
+	SandboxBackend      sandboxbackend.Backend
+	// AgentHarnessGateway, when non-nil, enables the substrate-backed
+	// AgentHarness gateway proxy at /api/agentharnesses/<ns>/<name>/gateway/.
+	// Required for browser access to openclaw VMs running in substrate
+	// actors. Lifted from pj-kagent.
+	AgentHarnessGateway *handlers.AgentHarnessGatewayConfig
 }
 
 // HTTPServer is the structure that manages the HTTP server
@@ -84,10 +89,12 @@ type HTTPServer struct {
 func NewHTTPServer(config ServerConfig) (*HTTPServer, error) {
 	// Initialize database
 
+	h := handlers.NewHandlers(config.KubeClient, defaultModelConfig, config.DbClient, config.WatchedNamespaces, config.Authorizer, config.ProxyURL, config.Reconciler, config.SandboxBackend)
+	h.AgentHarnessGateway = config.AgentHarnessGateway
 	return &HTTPServer{
 		config:        config,
 		router:        config.Router,
-		handlers:      handlers.NewHandlers(config.KubeClient, defaultModelConfig, config.DbClient, config.WatchedNamespaces, config.Authorizer, config.ProxyURL, config.Reconciler, config.SandboxBackend),
+		handlers:      h,
 		authenticator: config.Authenticator,
 	}, nil
 }
@@ -249,6 +256,13 @@ func (s *HTTPServer) setupRoutes() {
 	s.router.HandleFunc(APIPathAgents+"/{namespace}/{name}", adaptHandler(s.handlers.Agents.HandleDeleteAgent)).Methods(http.MethodDelete)
 
 	s.router.HandleFunc(APIPathAgentHarnesses, adaptHandler(s.handlers.Agents.HandleCreateAgentHarness)).Methods(http.MethodPost)
+
+	// Substrate-backed AgentHarness gateway proxy: forwards browser HTTP/WS
+	// traffic to the openclaw gateway running inside the substrate actor.
+	// Lifted from pj-kagent; see handlers/agentharness_gateway.go for shape.
+	// The trailing "/" prefix variant catches subpaths like /gateway/canvas/.
+	s.router.PathPrefix(APIPathAgentHarnesses + "/{namespace}/{name}/").HandlerFunc(adaptHandler(s.handlers.HandleAgentHarnessGateway))
+	s.router.HandleFunc(APIPathAgentHarnesses+"/{namespace}/{name}", adaptHandler(s.handlers.HandleAgentHarnessGateway))
 
 	// Model Provider Configs
 	s.router.HandleFunc(APIPathModelProviderConfigs+"/models", adaptHandler(s.handlers.ModelProviderConfig.HandleListSupportedModelProviders)).Methods(http.MethodGet)

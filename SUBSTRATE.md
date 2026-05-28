@@ -1509,9 +1509,10 @@ makes openclaw (and by extension the kagent ADK Declarative-agent path)
 golden-snapshot reliably. The patch demotes `cmdState`/`cmdDelete`
 failures after a successful `cmdCheckpoint` from fatal errors to
 warnings. The fix is ready for upstream PR pending substrate-team
-review of the approach; see `demo/substrate-poc/CHECKPOINT-BUG-REPRO.md`
-for the verbatim patch, evidence, and open questions to confirm with
-the maintainers before submitting.
+review of the approach. **Now superseded by §23, which documents the
+final state (all three demo paths working) and the full list of six
+substrate patches required to get there.** This section is kept for the
+debugging-narrative trail; §23 is the load-bearing summary.
 
 **Verification (2026-05-28 12:36 UTC):** spike-B (openclaw gateway, which
 had failed reliably for days) reaches `Ready` in ~42s with golden snapshot
@@ -1552,7 +1553,10 @@ is doing the right thing. The 20s timer is irrelevant. The "process-
 specific gVisor checkpoint incompatibility" theory was wrong.**
 
 The full evidence chain (sentry boot.txt, checkpoint.txt, delete.txt)
-is in `demo/substrate-poc/CHECKPOINT-BUG-REPRO.md`.
+was captured during this investigation. The standalone bug-report doc
+(`CHECKPOINT-BUG-REPRO.md` + spike YAML files) lived in
+`demo/substrate-poc/` for ~two days then was removed once §23 superseded
+it — kept in git history if the substrate team wants the verbatim logs.
 
 ### How spike-A still succeeds (best guess pending substrate-team review)
 
@@ -1672,21 +1676,67 @@ it doesn't fix the underlying gVisor systrap limitation.
      (BYO agent — what demo-alpha demonstrates).
   3. Substrate exposing a "no golden snapshot, boot fresh on every
      resume" mode for incompatible workloads (substrate API change).
-- **The harness-in-substrate port plan (`HARNESS-IN-SUBSTRATE-PLAN.md`)
-  inherits this blocker.** Until one of the above paths lands, porting
-  pj-kagent's code only enables a runtime that fails the same way.
+- **(Superseded 2026-05-28)** The harness-in-substrate port has been
+  completed and verified working — see §23 for the final state.
+  This section's pessimism predated patches #3–#6.
 
 ### Documentation updates as part of this revision
 
 - §11 risk entry rewritten to lead with the correct cause.
-- `demo/substrate-poc/DEMO.md` "Honest caveat" section updated to cite
-  this section.
-- `HARNESS-IN-SUBSTRATE-PLAN.md` already captures this conclusion in
-  its Stage-6 spike result (top of file).
-- **`demo/substrate-poc/CHECKPOINT-BUG-REPRO.md`** — standalone bug
-  report suitable for handing to the substrate maintainers, including
-  the verbatim ateom log fingerprint, the gVisor build version
-  (`release-20260511.0-42-ga7924c4ef10d-dirty`), the timeline showing
-  the sandbox dies silently between `gateway up` and `runsc checkpoint
-  pause`, and the two minimal ActorTemplate YAML files
-  (`spike-actortemplate-{a,b}.yaml`) needed to reproduce.
+- `demo/substrate-poc/DEMO.md` rewritten to reflect all three demo paths
+  working (see §23 below for the full final state).
+
+## 23. Final state — three working demo paths + AgentHarness substrate-backend port (2026-05-28)
+
+The cumulative work in §15–§22 plus the AgentHarness port now produces
+**three kagent-on-substrate paths that all work end-to-end on a single
+kind cluster** (kind 1.35 on Docker Desktop / macOS):
+
+| Path | CRD | Status |
+|---|---|---|
+| BYO Agent | `Agent` + `spec.type: BYO, workloadMode: sandbox` | Works. Single-prompt latency ~1s warm, ~3s cold-resume. |
+| Declarative Agent | `Agent` + `spec.type: Declarative, runtime: python` | Works. First prompt ~15s (cold restore); subsequent ~1s. Real `gpt-4o-mini` + `kagent-tool-server` MCP calls. |
+| AgentHarness (openclaw) | `AgentHarness` + `spec.runtime: substrate, backend: openclaw` | Works. WorkerPool + ActorTemplate auto-provisioned; openclaw VM reaches RUNNING in ~5min on a fresh substrate; Control UI accessible through kagent's `/api/agentharnesses/<ns>/<name>/gateway/` proxy. |
+
+### Six substrate-side patches required
+
+All in `agent-substrate/substrate` SHA `a436ea2…`. Carried as
+local-uncommitted changes; intended as upstream PRs after substrate-team
+review.
+
+| # | File | Patch summary |
+|---|---|---|
+| 1 | `cmd/atelet/oci.go` | Skip `tar.TypeChar/Block/Fifo` entries during image unpack (lets atelet unpack Debian/Wolfi/Alpine bases). |
+| 2 | `cmd/ateom-gvisor/runsc.go` | `-debug -debug-log -panic-log -debug-log-format=json` on all runsc invocations. Diagnostic. |
+| 3 | `cmd/ateom-gvisor/main.go::CheckpointWorkload` | Demote post-checkpoint `cmdState`/`cmdDelete` failures from RPC errors to warnings. Fixes the original `runsc checkpoint pause: exit 128` retry loop on any non-trivial workload. |
+| 4 | `cmd/atenet/internal/app/router/resumer.go` | bgCtx 15s → 60s. The kagent ADK image's `runsc restore` takes 14–18s on kind/macOS. |
+| 5 | `cmd/atenet/internal/app/router/xds.go` | ext_proc `Timeout` + `MessageTimeout` 5s → 60s. Coordinated with #4. |
+| 6 | `cmd/ateapi/internal/controlapi/workflow.go::ResumeActor/SuspendActor` | Lock TTL 30s → 120s (workflow timeout = `ttl - 2s padding`). The AgentHarness Resume path hits ate-api's own 28s workflow timeout. |
+
+### Kagent-side additions for the AgentHarness substrate-backend port
+
+Lifted from pj-kagent (with structural adaptations to fit our existing
+package layout); ~2500 LOC of new code.
+
+| Area | Files |
+|---|---|
+| New top-level openclaw helpers | `go/core/pkg/sandboxbackend/openclaw/` (bootstrap_shared/substrate, constants, credentials, defaults, modelconfig, provider, secrets, types). Channels (Telegram/Slack) stubbed out for this fork — restore from pj-kagent when needed. |
+| Substrate harness sub-package | `go/core/pkg/sandboxbackend/substrate/harness/` (client, config, delete_actor, delete_provision, gateway_token, openclaw, provision_actortemplate, provision_openclaw, provision_shared, provision_workerpool, provision, templates/openclaw_startup.sh.tmpl). |
+| CRD additions | `AgentHarnessSpec.Runtime` (enum: openshell, substrate), `AgentHarnessSpec.Substrate`, `AgentHarnessStatus.Substrate`. Optional; default `runtime: openshell` preserves existing behavior. |
+| Controller dispatch | `agentharness_controller.go` lifted wholesale from pj-kagent with imports adjusted for our `substrate/harness/` sub-package. Adds `OpenshellBackends`, `SubstrateBackends`, `SubstrateProvisioner` fields. |
+| Substrate-side event sources | `agentharness_substrate_watches.go` watches `WorkerPool`, `ActorTemplate`, `Deployment` for reconcile triggers. |
+| HTTP proxy handler | `httpserver/handlers/agentharness_gateway.go` proxies `/api/agentharnesses/<ns>/<name>/gateway/` (and subpaths, including WebSockets) to the openclaw gateway via the actor's pod IP. Lifted from pj-kagent. |
+| AsyncBackend interface | `sandboxbackend/async.go` merged `OnAgentHarnessReady` into `AsyncBackend` (matches pj-kagent); both openshell and harness backends implement it. |
+| app.go wiring | New `substrateHarnessEnabled` gate (set when `cfg.Substrate.ControlEndpoint != "" && cfg.Substrate.WorkerPoolAteomImage != ""`); builds `harness.Client`, `SubstrateBackends`, `harness.Provisioner` at startup, and an `AgentHarnessGatewayConfig` for the HTTP proxy. |
+
+### Things this state does NOT address
+
+- **Worker-recycle stuck actors.** If a worker pod is recycled while an actor is `STATUS_RESUMING`, the actor wedges pointing at the dead pod. Workaround: `kubectl ate suspend actor <id>` → controller's next reconcile resumes cleanly on a live worker. Worth documenting upstream as an ate-controller responsibility.
+- **GKE install.** Substrate's `install-ate.sh --deploy-ate-system` hangs on every GKE channel we tried (stable/regular/rapid/alpha-cluster) because `certificates.k8s.io/v1beta1.ClusterTrustBundle` is not served. Open question for the substrate team.
+- **Channels (Telegram/Slack) in the openclaw harness.** We stubbed those out when lifting the openclaw package (`bootstrap_substrate.go` now passes an empty channelEnv); restore from pj-kagent's `channels_substrate.go` + `channels_shared.go` when needed.
+
+### Pointers
+
+- `demo/substrate-poc/DEMO.md` — current walkthrough for all three paths.
+- `demo/substrate-poc/05-builtin-k8s-agent.yaml` — Declarative path.
+- `demo/substrate-poc/06-openclaw-harness.yaml` — AgentHarness path.

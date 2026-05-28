@@ -12,6 +12,14 @@ import (
 
 // Handlers holds all the HTTP handler components
 type Handlers struct {
+	// KubeClient + AgentHarnessGateway support the substrate-backed
+	// AgentHarness gateway proxy (HandleAgentHarnessGateway at
+	// /api/agentharnesses/<ns>/<name>/gateway/). KubeClient is also held in
+	// Base; the gateway handler is a method on *Handlers directly so it
+	// needs them at this level too.
+	KubeClient          client.Client
+	AgentHarnessGateway *AgentHarnessGatewayConfig
+
 	Health              *HealthHandler
 	ModelConfig         *ModelConfigHandler
 	Model               *ModelHandler
@@ -55,6 +63,7 @@ func NewHandlers(kubeClient client.Client, defaultModelConfig types.NamespacedNa
 	}
 
 	return &Handlers{
+		KubeClient:          kubeClient,
 		Health:              NewHealthHandler(),
 		ModelConfig:         NewModelConfigHandler(base),
 		Model:               NewModelHandler(base),

@@ -47,6 +47,7 @@ import (
 	reconcilerutils "github.com/kagent-dev/kagent/go/core/internal/controller/reconciler/utils"
 	agent_translator "github.com/kagent-dev/kagent/go/core/internal/controller/translator/agent"
 	"github.com/kagent-dev/kagent/go/core/internal/httpserver"
+	"github.com/kagent-dev/kagent/go/core/internal/httpserver/handlers"
 	common "github.com/kagent-dev/kagent/go/core/internal/utils"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -57,7 +58,9 @@ import (
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/kagent-dev/kagent/go/core/pkg/migrations"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
+	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/openclaw"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/openshell"
+	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/substrate/harness"
 	"github.com/kagent-dev/kagent/go/core/pkg/translator"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -81,7 +84,7 @@ import (
 	agentsandboxv1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	substratev1 "github.com/agent-substrate/substrate/api/v1alpha1"
+	substratev1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -655,23 +658,77 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		os.Exit(1)
 	}
 
-	if cfg.Openshell.GatewayURL != "" {
+	// Build openshell + substrate harness backends. The AgentHarness controller
+	// runs when at least one is configured.
+	openshellHarnessEnabled := cfg.Openshell.GatewayURL != ""
+	substrateHarnessEnabled := cfg.Substrate.ControlEndpoint != "" && cfg.Substrate.WorkerPoolAteomImage != ""
+	if openshellHarnessEnabled || substrateHarnessEnabled {
 		kubeClient := mgr.GetClient()
-		openshellBackends, err := buildOpenshellSandboxBackends(ctx, &cfg, kubeClient)
-		if err != nil {
-			setupLog.Error(err, "unable to build openshell sandbox backends")
-			os.Exit(1)
+		var openshellBackends map[v1alpha2.AgentHarnessBackendType]sandboxbackend.AsyncBackend
+		var substrateBackends map[v1alpha2.AgentHarnessBackendType]sandboxbackend.AsyncBackend
+		var substrateProvisioner *harness.Provisioner
+
+		if openshellHarnessEnabled {
+			var err error
+			openshellBackends, err = buildOpenshellSandboxBackends(ctx, &cfg, kubeClient)
+			if err != nil {
+				setupLog.Error(err, "unable to build openshell sandbox backends")
+				os.Exit(1)
+			}
 		}
+
+		if substrateHarnessEnabled {
+			harnessCfg := harness.Config{
+				AteAPIEndpoint: cfg.Substrate.ControlEndpoint,
+				Insecure:       cfg.Substrate.ControlPlaintext,
+				DialTimeout:    10 * time.Second,
+				// CallTimeout bumped from the original 30s pj-kagent default —
+				// ResumeActor for an openclaw harness goes through
+				// atelet.RestoreWorkload, which on kind/macOS lands at
+				// 14–20s for the OCI rootfs unpack on cold cache and can
+				// occasionally cross 30s when atelet is busy. 120s gives
+				// plenty of headroom for slow first restores without
+				// stuck-resume retry loops. See SUBSTRATE.md §22 + the
+				// atenet 60s bgCtx companion patch.
+				CallTimeout:                   120 * time.Second,
+				DefaultActorTemplateNamespace: cfg.Substrate.WorkerPoolNamespace,
+			}
+			harnessClient, err := harness.Dial(ctx, harnessCfg)
+			if err != nil {
+				setupLog.Error(err, "unable to dial substrate Control API for harness backend")
+				os.Exit(1)
+			}
+			openClawBackend := harness.NewOpenClawBackend(harnessClient, harnessCfg, v1alpha2.AgentHarnessBackendOpenClaw, mgr.GetEventRecorderFor("agentharness-openclaw-substrate"))
+			substrateBackends = map[v1alpha2.AgentHarnessBackendType]sandboxbackend.AsyncBackend{
+				v1alpha2.AgentHarnessBackendOpenClaw: openClawBackend,
+			}
+			substrateProvisioner = &harness.Provisioner{
+				Client: kubeClient,
+				Ate:    harnessClient,
+				Defaults: harness.ProvisionDefaults{
+					PauseImage:           cfg.Substrate.PauseImage,
+					RunscAMD64URL:        cfg.Substrate.RunscAMD64URL,
+					RunscAMD64SHA256:     cfg.Substrate.RunscAMD64SHA256,
+					RunscARM64URL:        cfg.Substrate.RunscARM64URL,
+					RunscARM64SHA256:     cfg.Substrate.RunscARM64SHA256,
+					DefaultAteomImage:    cfg.Substrate.WorkerPoolAteomImage,
+					DefaultWorkloadImage: openclaw.NemoclawSandboxBaseImage,
+				},
+			}
+		}
+
 		if err := (&controller.AgentHarnessController{
-			Client:   kubeClient,
-			Recorder: mgr.GetEventRecorder("agentharness-controller"),
-			Backends: openshellBackends,
+			Client:               mgr.GetClient(),
+			Recorder:             mgr.GetEventRecorder("agentharness-controller"),
+			OpenshellBackends:    openshellBackends,
+			SubstrateBackends:    substrateBackends,
+			SubstrateProvisioner: substrateProvisioner,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AgentHarness")
 			os.Exit(1)
 		}
 	} else {
-		setupLog.Info("AgentHarness controller disabled: --openshell-gateway-url not set")
+		setupLog.Info("AgentHarness controller disabled: set --openshell-gateway-url and/or substrate.WorkerPoolAteomImage")
 	}
 
 	if err = (&controller.ModelConfigController{
@@ -779,19 +836,34 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		os.Exit(1)
 	}
 
+	// AgentHarness gateway proxy: only enable when the substrate harness
+	// backend is configured (same gate as the AgentHarness controller's
+	// substrate dispatch). Without this, /api/agentharnesses/<ns>/<name>/gateway/
+	// returns 503 ("substrate gateway proxy is not configured").
+	var agentHarnessGatewayCfg *handlers.AgentHarnessGatewayConfig
+	if substrateHarnessEnabled {
+		agentHarnessGatewayCfg = &handlers.AgentHarnessGatewayConfig{
+			AteAPIEndpoint: cfg.Substrate.ControlEndpoint,
+			AteAPIInsecure: cfg.Substrate.ControlPlaintext,
+			DialTimeout:    10 * time.Second,
+			CallTimeout:    30 * time.Second,
+		}
+	}
+
 	httpServer, err := httpserver.NewHTTPServer(httpserver.ServerConfig{
-		Router:            router,
-		BindAddr:          cfg.HttpServerAddr,
-		KubeClient:        mgr.GetClient(),
-		A2AHandler:        a2aHandler,
-		MCPHandler:        mcpHandler,
-		WatchedNamespaces: watchNamespacesList,
-		DbClient:          dbClient,
-		Authorizer:        extensionCfg.Authorizer,
-		Authenticator:     extensionCfg.Authenticator,
-		ProxyURL:          cfg.Proxy.URL,
-		Reconciler:        rcnclr,
-		SandboxBackend:    extensionCfg.SandboxBackend,
+		Router:              router,
+		BindAddr:            cfg.HttpServerAddr,
+		KubeClient:          mgr.GetClient(),
+		A2AHandler:          a2aHandler,
+		MCPHandler:          mcpHandler,
+		WatchedNamespaces:   watchNamespacesList,
+		DbClient:            dbClient,
+		Authorizer:          extensionCfg.Authorizer,
+		Authenticator:       extensionCfg.Authenticator,
+		ProxyURL:            cfg.Proxy.URL,
+		Reconciler:          rcnclr,
+		SandboxBackend:      extensionCfg.SandboxBackend,
+		AgentHarnessGateway: agentHarnessGatewayCfg,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create HTTP server")

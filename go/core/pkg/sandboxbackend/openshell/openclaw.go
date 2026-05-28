@@ -27,8 +27,7 @@ type ClawBackend struct {
 }
 
 var (
-	_ sandboxbackend.AsyncBackend     = (*ClawBackend)(nil)
-	_ sandboxbackend.PostReadyBackend = (*ClawBackend)(nil)
+	_ sandboxbackend.AsyncBackend = (*ClawBackend)(nil)
 )
 
 func newClawBackend(

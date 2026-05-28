@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	substratev1 "github.com/agent-substrate/substrate/api/v1alpha1"
+	substratev1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	substratev1 "github.com/agent-substrate/substrate/api/v1alpha1"
+	substratev1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 )
 

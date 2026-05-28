@@ -1,13 +1,76 @@
-# Demo — built-in kagent agents inside agent-substrate
+# Demo — kagent on agent-substrate (three working paths)
 
-This is the **in-cluster, helm-installed, CRD-driven** walkthrough. The
-kagent controller runs as a Deployment (no host binary), substrate provides
-the sandbox runtime, and a `Agent` CR (with `spec.workloadMode: sandbox`) that mirrors the helm-shipped
-`k8s-agent` (`type: Declarative`, MCP tools, real LLM) proves the path
-end-to-end. The agent answers real Kubernetes questions by calling
-`kagent-tool-server` from inside a gVisor sandbox.
+In-cluster, helm-installed, CRD-driven walkthrough demonstrating **three
+distinct kagent-on-substrate runtimes**, all running on a single kind
+cluster against a substrate fork carrying six small patches:
 
-See [SUBSTRATE.md](../../SUBSTRATE.md) for the design + phase outcomes.
+1. **BYO Agent** — a hand-rolled FastAPI image (`demo-alpha`) packaged as
+   `kind: Agent, spec.type: BYO, spec.workloadMode: sandbox`. Boots in
+   ~2s, proves the substrate runtime + A2A + UI chat panel end-to-end.
+2. **Declarative Agent** — the helm-shipped `k8s-agent` shape
+   (`kind: Agent, spec.type: Declarative, runtime: python`) running the
+   real kagent ADK with `gpt-4o-mini` + `kagent-tool-server` MCP tools,
+   inside a gVisor sandbox. Answers real `kubectl get` questions.
+3. **AgentHarness on substrate** — `kind: AgentHarness, spec.runtime:
+   substrate, spec.backend: openclaw`. Auto-provisions a per-harness
+   `WorkerPool` + `ActorTemplate`, runs an openclaw VM inside a
+   substrate gVisor sandbox, and serves the OpenClaw Control UI through
+   a kagent-controller proxy at
+   `/api/agentharnesses/<ns>/<name>/gateway/`.
+
+See [SUBSTRATE.md](../../SUBSTRATE.md) for the full design + history of
+substrate-side fork patches.
+
+> **What the demo proves:** kagent agents defined entirely by CRD run
+> inside substrate gVisor sandboxes with no per-agent Deployment. The
+> Declarative path calls `gpt-4o-mini` over the public internet and uses
+> MCP to call back into `kagent-tool-server` for real `kubectl get pods`
+> data. Substrate's checkpoint/restore preserves the Python process
+> memory across suspend cycles. The AgentHarness path lets kagent
+> orchestrate the openclaw VM stack on top of substrate via the
+> `runtime: substrate, backend: openclaw` knob, replicating the
+> `examples/substrate-openclaw` workflow from pj-kagent.
+
+## Substrate fork patches required for this demo
+
+The upstream `agent-substrate/substrate` repo on `main`
+(SHA `a436ea2…` as of 2026-05-27) needs six small patches before any of
+the three demos work end-to-end on `kind-on-macOS`. They live as three
+logical commits on a **`ceposta-kagent`** branch in your local substrate
+checkout (intended as upstream PRs after substrate-team review).
+
+```bash
+cd ~/go/src/github.com/agent-substrate/substrate
+git checkout ceposta-kagent
+git log --oneline master..HEAD
+```
+
+You should see three commits ahead of `master`:
+
+```
+4125b45  substrate timeouts: bump restore-path budgets for cold-cache workloads
+6ac9710  ateom-gvisor: enable sentry debug logs + tolerate post-checkpoint cleanup race
+b4f4930  atelet: skip device/FIFO tar entries during image unpack
+```
+
+What's in each commit and why:
+
+| Commit | Files | Effect |
+|---|---|---|
+| `b4f4930` atelet | `cmd/atelet/oci.go` | Skip `tar.TypeChar/TypeBlock/TypeFifo` entries during image unpack. Lets atelet unpack any Debian/Wolfi/Alpine base image (every workload image with a `/dev/null` char-device in its base layer). |
+| `6ac9710` ateom-gvisor | `cmd/ateom-gvisor/runsc.go` + `cmd/ateom-gvisor/main.go` | Enable sentry debug logs (diagnostic; toggles were pre-staged as commented-out lines upstream) + demote post-checkpoint `cmdState`/`cmdDelete` failures from fatal RPC errors to warnings. Without the second half, openclaw + kagent ADK both fail with `runsc checkpoint pause: exit status 128` retried forever. |
+| `4125b45` timeouts | `cmd/atenet/internal/app/router/resumer.go` + `cmd/atenet/internal/app/router/xds.go` + `cmd/ateapi/internal/controlapi/workflow.go` | Three coordinated timeout increases: atenet's `bgCtx` 15s→60s, atenet's ext_proc `Timeout` + `MessageTimeout` 5s→60s, and ateapi's `ResumeActor`/`SuspendActor` lock TTL 30s→120s. All three are needed because the kagent ADK image's `runsc restore` consistently lands at 14–18s on kind/macOS. |
+
+Each commit has rationale in its message; each patch has a `kagent fork:`
+or `kagent local fork:` comment on the modified lines so future-`git
+blame` makes the change obvious.
+
+**Heads-up:** if your local substrate checkout doesn't have a
+`ceposta-kagent` branch (or upstream gets ahead of `a436ea2…`), you'll
+need to recreate the branch — either cherry-pick the three commits onto
+the new `master` or apply them manually using the same line-level edits.
+The commit messages contain enough context to recreate the patches by
+hand if needed.
 
 > **What the demo proves:** a kagent agent defined entirely by CRD
 > (`Agent` with `workloadMode: sandbox` + `ModelConfig` + `RemoteMCPServer`) runs inside
@@ -30,17 +93,39 @@ See [SUBSTRATE.md](../../SUBSTRATE.md) for the design + phase outcomes.
 ## Cluster + substrate (one-time, ~5 min)
 
 ```bash
-# 1. Create the demo cluster. Substrate's kind config enables
+# 1. Switch to the ceposta-kagent branch in your local substrate checkout.
+#    install-ate-kind.sh below builds substrate's images via `ko` from
+#    whatever's checked out, so the patches need to be in place BEFORE
+#    running it. See the "Substrate fork patches" section above for what
+#    these three commits do.
+cd ~/go/src/github.com/agent-substrate/substrate
+git checkout ceposta-kagent
+git log --oneline master..HEAD   # should show 3 commits
+
+# 2. Create the demo cluster. Substrate's kind config enables
 #    ClusterTrustBundle/PodCertificateRequest feature gates (required by
 #    substrate's mTLS chain) and pre-wires the localhost:5001 kind-registry.
-cd ~/go/src/github.com/agent-substrate/substrate
 KIND_CLUSTER_NAME=kagent-substrate ./hack/create-kind-cluster.sh
 
-# 2. Install substrate (~3-5 min: builds + pushes images, applies CRDs,
-#    waits for ate-system rollout).
+# 3. Install substrate (~3-5 min: builds + pushes patched images via ko,
+#    applies CRDs, waits for ate-system rollout). Picks up our patches
+#    automatically since they're committed in the local checkout.
+#
+#    IMPORTANT: install-ate-kind.sh pushes atelet/ate-api/atenet/etc. but
+#    NOT ateom-gvisor — that image is consumed by kagent (the WorkerPool
+#    container), not by substrate itself. We have to build + push it
+#    manually as a separate step, below.
 ./hack/install-ate-kind.sh --deploy-ate-system
 
-# 3. Sanity-check substrate is healthy.
+# 4. Build + push the patched ateom-gvisor image. Use --base-import-paths
+#    so the pushed tag is the stable `ateom-gvisor:latest` (vs ko's default
+#    content-hashed name which changes between builds and breaks the values
+#    file's reference). kagent-substrate-values.yaml's
+#    `substrate.workerPoolAteomImage` is pinned to this bare tag.
+NO_DEV_ENV=true KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS=linux/amd64 \
+  ./hack/run-tool.sh ko build --base-import-paths --push ./cmd/ateom-gvisor
+
+# 5. Sanity-check substrate is healthy.
 kubectl get pods -n ate-system
 # Expect ate-api-server, ate-controller, atelet, atenet-router, rustfs, and
 # valkey-cluster-{0..5} all Running. If ate-api-server is crash-looping with
@@ -239,52 +324,93 @@ substrate's `runsc restore` brings the same memory state back. Hit
 `startup_uuid` is unchanged and `request_count` continues incrementing
 across suspend/resume.
 
-### Optional: a real LLM-driven agent (the `k8s-agent` path)
+### The Declarative real-LLM path (`k8s-agent-substrate`)
 
 `demo/substrate-poc/05-builtin-k8s-agent.yaml` is functionally
 equivalent to the helm-shipped `k8s-agent` (`type: Declarative`, real
-gpt-4o-mini, `kagent-tool-server` MCP tools). When it works, the chat
-returns real `kubectl get` data answered by an LLM call from inside the
-sandbox.
+gpt-4o-mini, `kagent-tool-server` MCP tools). The chat returns real
+`kubectl get` data answered by an LLM call from inside the sandbox.
 
-**Honest caveat: it doesn't reliably reach Ready, and the cause is NOT
-boot timing.** The golden snapshot fails with `runsc checkpoint pause:
-exit 128` because gVisor systrap can't checkpoint certain process states
-the kagent ADK accumulates (open TLS sockets to the LLM provider, asyncio
-event-loop state, threads, etc.). Earlier we hypothesized that
-substrate's hardcoded `TakeGoldenSnapshotAt = now + 20s` timer was firing
-before the ADK finished booting. That hypothesis was tested and
-disproved (see SUBSTRATE.md §22):
-
-- **120s timer patch**: extending the timer to 2 minutes — well past any
-  cold-start budget — produced the exact same `exit 128` failure.
-- **Openclaw spike (2026-05-25)**: a different process (Go binary) that
-  is provably fully booted by t=6s, well within any timer window, hit
-  the **identical** `runsc checkpoint pause: exit 128` at the snapshot
-  point. Different process, same failure mode — so it's process-specific
-  gVisor incompatibility, not boot timing.
-
-What `demo-alpha` (FastAPI/uvicorn, minimal, single-threaded, no
-external network) shows by contrast is that simple workloads do
-checkpoint cleanly. The blocker for `k8s-agent-substrate` is whatever
-syscall/state pattern the ADK + OpenAI SDK + OTEL touches that gVisor
-can't serialize. The §17 `_substrate_checkpoint_friendly.install()`
-hook makes the *first* suspend cycle work by closing httpx TLS pools,
-but the post-resume state isn't stably checkpointable. Use this section
-only to demonstrate a one-shot lucky cold start of the real-LLM path;
-don't expect sustained reliability.
+**Reliability:** with the six substrate fork patches at the top of this
+doc applied, this path is **deterministically Ready in ~40s** and serves
+real prompts. The first request after a long idle takes ~14–18s
+(`runsc restore` cold path through the OCI rootfs unpack) which is why
+substrate patches #4 and #5 bump the atenet timeouts to 60s. Subsequent
+requests hit the warm actor in <1s.
 
 ```bash
 kubectl apply -f demo/substrate-poc/05-builtin-k8s-agent.yaml
-# Wait up to 5min; lucky cold-start success only. Most attempts hit the
-# checkpoint-exit-128 loop. See SUBSTRATE.md §22.
 kubectl wait agent k8s-agent-substrate -n kagent --for=condition=Ready --timeout=300s
 
-# If/when Ready:
+kubectl port-forward -n kagent svc/kagent-controller 18093:8083 &
+
 curl -sS --max-time 120 -X POST -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","messageId":"k8s-1","parts":[{"kind":"text","text":"List pods in kube-system."}]}}}' \
     http://localhost:18093/api/a2a/kagent/k8s-agent-substrate/
 ```
+
+Expected: a real markdown answer listing pods, generated by `gpt-4o-mini`
+after the agent called `k8s_get_resources` MCP tool via `kagent-tool-server`.
+
+### The AgentHarness openclaw path (`runtime: substrate, backend: openclaw`)
+
+`demo/substrate-poc/06-openclaw-harness.yaml` is an `AgentHarness` that
+runs an openclaw VM inside a substrate gVisor sandbox. The kagent
+controller's substrate harness backend:
+
+- auto-provisions a per-harness `WorkerPool` in the harness's namespace
+- auto-provisions an `ActorTemplate` referencing the
+  `ghcr.io/kagent-dev/nemoclaw/sandbox-base` image
+- triggers golden-snapshot of the openclaw startup (succeeds thanks to
+  substrate patch #3)
+- creates + resumes the harness actor, watches it transition to
+  STATUS_RUNNING
+- registers an HTTP proxy at `/api/agentharnesses/<ns>/<name>/gateway/`
+  that forwards browser traffic (including WebSockets) to the openclaw
+  Control UI inside the sandbox
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: kagent.dev/v1alpha2
+kind: AgentHarness
+metadata:
+  name: openclaw-test
+  namespace: kagent
+spec:
+  runtime: substrate
+  backend: openclaw
+  description: OpenClaw on Agent Substrate
+  modelConfigRef: default-model-config
+  substrate:
+    snapshotsConfig:
+      location: gs://ate-snapshots/kagent/openclaw-test/
+    workerPool:
+      replicas: 1
+      # ateomImage falls back to controller.substrate.workerPoolAteomImage
+      # in the helm values file (substrate's reproducible ko-built tag).
+    gatewayToken: test-token
+EOF
+
+# Reaches Ready in ~5min on a fresh substrate (image pull + WorkerPool roll
+# + ActorTemplate golden snapshot + actor Resume). Subsequent re-applies
+# are faster because images are cached.
+kubectl wait agentharness openclaw-test -n kagent --for=condition=Ready --timeout=600s
+
+# Open the OpenClaw Control UI through the kagent proxy:
+kubectl port-forward -n kagent svc/kagent-controller 18093:8083 &
+open http://localhost:18093/api/agentharnesses/kagent/openclaw-test/gateway/
+# Token to enter in the OpenClaw login form: test-token
+```
+
+> **Worker-recycle gotcha.** If a worker pod is recycled (e.g., by an
+> ate-controller rollout) while the harness actor is `STATUS_RESUMING`,
+> the actor wedges pointing at the dead pod and the harness controller
+> doesn't always re-anchor. Unstick:
+>
+> ```bash
+> kubectl ate suspend actor ahr-<ns>-<name>
+> # The harness controller's next reconcile resumes it on a live worker.
+> ```
 
 ## Drive the same flow through the UI
 

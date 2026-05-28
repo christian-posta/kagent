@@ -48,7 +48,7 @@ substrate:
   workerPoolName: poc-pool
   workerPoolNamespace: kagent-substrate-poc
   workerPoolReplicas: 2
-  workerPoolAteomImage: "localhost:5001/ateom-gvisor-34ef0400225d9f0582e4c906399c2137:latest"
+  workerPoolAteomImage: "localhost:5001/ateom-gvisor:latest"
   controlEndpoint: "api.ate-system.svc.cluster.local:443"
   controlPlaintext: false
   routerURL: "http://atenet-router.ate-system.svc"
