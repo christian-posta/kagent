@@ -29,6 +29,24 @@ func DefaultWorkloadMode() WorkloadMode {
 	return defaultWorkloadMode
 }
 
+// defaultAAuthEnabled is the install-wide fallback applied to every
+// declarative Agent that doesn't explicitly set `spec.declarative.aauth`.
+// false matches the legacy opt-in behavior; helm chart value
+// `controller.defaultAAuthEnabled: true` flips it so every declarative
+// Agent gets AAuth signing turned on by default.
+var defaultAAuthEnabled = false
+
+// SetDefaultAAuthEnabled overrides the package-level default. Called once
+// at controller startup from the --default-aauth-enabled flag.
+func SetDefaultAAuthEnabled(enabled bool) {
+	defaultAAuthEnabled = enabled
+}
+
+// DefaultAAuthEnabled returns the current package-level default.
+func DefaultAAuthEnabled() bool {
+	return defaultAAuthEnabled
+}
+
 // AgentObject is the shared shape implemented by Agent. It remains an
 // interface because earlier versions of kagent shipped both `Agent` and
 // `SandboxAgent` CRDs; collapsing them is in progress, and downstream code

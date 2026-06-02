@@ -16,7 +16,7 @@ spec:
   type: BYO
   byo:
     deployment:
-      image: localhost:5001/substrate-poc-agent:p3
+      image: localhost:5001/substrate-poc-agent:p5
       cmd: /usr/local/bin/uvicorn
       args: [agent:app, --app-dir, /app, --host, 0.0.0.0, --port, "80", --log-level, info, --loop, asyncio, --http, h11]
 ---
@@ -31,7 +31,7 @@ spec:
   type: BYO
   byo:
     deployment:
-      image: localhost:5001/substrate-poc-agent:p3
+      image: localhost:5001/substrate-poc-agent:p5
       cmd: /usr/local/bin/uvicorn
       args: [agent:app, --app-dir, /app, --host, 0.0.0.0, --port, "80", --log-level, info, --loop, asyncio, --http, h11]
 ---
@@ -46,7 +46,7 @@ spec:
   type: BYO
   byo:
     deployment:
-      image: localhost:5001/substrate-poc-agent:p3
+      image: localhost:5001/substrate-poc-agent:p5
       cmd: /usr/local/bin/uvicorn
       args: [agent:app, --app-dir, /app, --host, 0.0.0.0, --port, "80", --log-level, info, --loop, asyncio, --http, h11]
 ---
@@ -61,6 +61,6 @@ spec:
   type: BYO
   byo:
     deployment:
-      image: localhost:5001/substrate-poc-agent:p3
+      image: localhost:5001/substrate-poc-agent:p5
       cmd: /usr/local/bin/uvicorn
       args: [agent:app, --app-dir, /app, --host, 0.0.0.0, --port, "80", --log-level, info, --loop, asyncio, --http, h11]

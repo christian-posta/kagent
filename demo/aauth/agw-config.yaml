@@ -12,6 +12,34 @@
 # The AAuth signer hook (AAUTH_ENABLED=true) signs every outbound request;
 # agentgateway then verifies the signature before forwarding upstream.
 
+# Per-request access log fields. CEL expressions read from the live request
+# at log-emission time.
+#
+# ⚠️  This config logs the raw AAuth headers (including `Signature-Key`,
+#     which carries the agent's aa-agent+jwt — a workload credential that
+#     lets anyone re-sign as the agent until its `exp`). That's fine on a
+#     local kind demo where the gateway log lands at
+#     /tmp/kagent-aauth-agentgateway.log on your laptop and nowhere else.
+#     Do NOT enable this against a cluster whose logs ship to a shared
+#     aggregator (Loki, Splunk, Datadog, etc.).
+#
+# To switch back to the "headers names + lengths only" variant, replace
+# `request.headers["X"]` with `size(request.headers["X"]) > 0` (boolean)
+# or `size(request.headers["X"])` (int).
+frontendPolicies:
+  accessLog:
+    add:
+      # RFC 9421 metadata — algorithm, timestamp, components covered.
+      # Not a credential on its own.
+      aauth.signature_input:    'request.headers["signature-input"]'
+      # The RFC 9421 signature value (base64). Useless without the matching
+      # cnf.jwk inside the JWT, but logged here for end-to-end visibility.
+      aauth.signature:          'request.headers["signature"]'
+      # ⚠️  Workload credential. The JWT inside identifies this agent and
+      # binds its signing key via cnf.jwk. Replayable across requests
+      # until the JWT's `exp`.
+      aauth.signature_key:      'request.headers["signature-key"]'
+
 binds:
 - port: 3030
   listeners:

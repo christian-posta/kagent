@@ -1810,3 +1810,90 @@ gateway already uses.
   Suspend was canceled mid-write — see DEMO.md's troubleshooting
   section on "actor wedged in Resuming". The UI just renders whatever
   ate-api returns; it can't tell a valid snapshot from a broken one.
+
+## 25. Open follow-ups — substrate-mode session management (2026-06-01)
+
+Found while running the AAuth verification flow through the UI. Both
+are independent of AAuth itself.
+
+### 25a. Orphan session rows when a substrate Agent is deleted + recreated
+
+**Symptom.** UI shows "failed to create session" the first time you
+chat with a freshly-recreated substrate Agent. Controller log has:
+
+```
+"Sandbox agents support only one chat session",
+error="a session already exists for this agent",
+path=/api/sessions, status=409
+```
+
+**Why.** `sessions.go:135` enforces a one-session-per-agent rule for
+`WorkloadModeSandbox` agents (the agent process inside the gVisor
+sandbox uses an in-memory session store via the `--local` flag, can't
+multiplex per-session state across actor restores). The check calls
+`DatabaseService.ListSessionsForAgentAllUsers(agent.ID)`. The `agent.ID`
+is the Python-identifier of `<ns>/<name>` (e.g.
+`kagent__NS__aauth_test_agent`), which is **stable across delete +
+re-apply** of the Agent CR. So rows in the `session` table created by
+previous incarnations stay attached to the new agent's ID — and the
+duplicate check sees them.
+
+The user-facing `GET /api/sessions/agent/<ns>/<name>` filters by
+`user_id`, so the orphans don't show up in the UI session list either.
+They're invisible to the user but visible to the duplicate check —
+worst possible combination.
+
+**Workaround.** Direct DB cleanup:
+
+```bash
+PG_POD=$(kubectl get pods -n kagent -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
+PG_PW=$(kubectl get secret -n kagent kagent-postgresql -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
+kubectl exec -n kagent $PG_POD -- env PGPASSWORD=$PG_PW psql -U kagent -d kagent \
+    -c "DELETE FROM session WHERE agent_id = 'kagent__NS__aauth_test_agent';"
+```
+
+**Fix candidates** (any of these closes the gap):
+
+1. **Cascade-delete on Agent finalizer.** The `AgentController` already
+   runs a finalizer for sandbox-mode agents (B1's sequenced actor
+   delete). Have that finalizer also `DELETE FROM session WHERE
+   agent_id = $1` so the DB never carries orphan sessions past an Agent
+   CR delete.
+2. **Cascade FK + ON DELETE CASCADE.** Add `agent_id` → `agent(id)`
+   foreign key with `ON DELETE CASCADE`. The controller currently does
+   `DELETE FROM agent WHERE id = ?` on finalizer cleanup, which would
+   then sweep sessions automatically. Cheaper than option 1 but
+   schema-wide.
+3. **Bound the duplicate check to live agents only.** Less correct —
+   if the agent is "live" but the session is from a previous CR
+   generation, we'd want to clear it anyway because the actor's
+   in-memory session state was lost across the recreate.
+
+Option 1 or 2 is the right fix. Option 1 is more conservative; option
+2 covers more cases (e.g. uninstall via helm) at the cost of an irre-
+versible schema change.
+
+### 25b. UI swallows the controller's 409 reason
+
+**Symptom.** Browser shows "failed to create session" with no detail.
+The controller returned 409 with body `{"error":true,"message":"Sandbox
+agents support only one chat session", ...}` — enough information for
+the user to understand what to do, but the UI's error toast didn't
+surface it.
+
+**Fix.** The UI's chat-session-create flow should read `response.message`
+on a 409 (or any non-2xx) and render it in the toast/error banner.
+Code path:
+
+- `ui/src/app/actions/sessions.ts` — `createSession()` action.
+- Wherever the UI's chat page calls that action and shows the failure.
+
+Until 25a is in, this is still useful — the user gets the actual reason
+("only one chat session") so they know to delete the existing session
+or recreate the agent.
+
+### Status
+
+Both filed here as PoC follow-ups; not in scope for the substrate-
+observability + AAuth-by-default branch. Worth picking up the next
+time someone touches the session handler or the chat UI.

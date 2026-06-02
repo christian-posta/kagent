@@ -267,6 +267,61 @@ func (b *Backend) applyAgentImageOverride(c *substratev1.Container, in sandboxba
 	if in.SRTSettingsJSON != "" {
 		c.Env = append(c.Env, corev1.EnvVar{Name: "KAGENT_SRT_SETTINGS_JSON", Value: in.SRTSettingsJSON})
 	}
+	applyAAuthSubstrateEnv(c, in)
+}
+
+// applyAAuthSubstrateEnv adjusts the AAuth env vars on a substrate-mode
+// container when the agent has spec.aauth.enabled=true. Two things differ
+// from the deployment-mode path:
+//
+//  1. AAUTH_SA_TOKEN_PATH is rewritten to the worker pod's default projected
+//     SA token at /var/run/secrets/kubernetes.io/serviceaccount/token.
+//     Substrate's ActorTemplate container schema has no volume support, so
+//     the audience-scoped token used in deployment mode cannot be mounted
+//     here. The token is still pod-bound (TokenReview surfaces pod identity
+//     via UserInfo.Extra), which is what the substrate-side mint flow checks
+//     against Control.GetActor's reported placement. Audience-scoping is a
+//     known follow-up that needs WorkerPool template changes.
+//
+//  2. KAGENT_SUBSTRATE_ACTOR_ID is added so the Python signer includes it in
+//     the mint request body. The controller's substrate-aware authenticator
+//     looks up the actor via this id, verifies the calling worker pod is
+//     hosting it, then derives the canonical sub from the ActorTemplate's
+//     kagent.dev/agent-name + kagent.dev/agent-namespace labels.
+func applyAAuthSubstrateEnv(c *substratev1.Container, in sandboxbackend.BuildInput) {
+	if !hasEnv(c.Env, "AAUTH_ENABLED") {
+		return
+	}
+	c.Env = filterEnv(c.Env, "AAUTH_SA_TOKEN_PATH")
+	c.Env = append(c.Env,
+		corev1.EnvVar{
+			Name:  "AAUTH_SA_TOKEN_PATH",
+			Value: "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		},
+		corev1.EnvVar{
+			Name:  "KAGENT_SUBSTRATE_ACTOR_ID",
+			Value: ActorIDFor(in.Agent.GetNamespace(), in.Agent.GetName()),
+		},
+	)
+}
+
+func hasEnv(envs []corev1.EnvVar, name string) bool {
+	for i := range envs {
+		if envs[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func filterEnv(envs []corev1.EnvVar, name string) []corev1.EnvVar {
+	out := envs[:0]
+	for _, e := range envs {
+		if e.Name != name {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func (b *Backend) runscConfig() substratev1.RunscConfig {

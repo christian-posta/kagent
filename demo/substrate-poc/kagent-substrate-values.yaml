@@ -16,6 +16,24 @@ controller:
   # fallback. Override individual agents with workloadMode: deployment
   # if you want them to run as a regular Deployment.
   defaultWorkloadMode: sandbox
+  # Turn on AAuth signing for every declarative Agent in this install
+  # (legacy default is false → opt-in per agent via spec.declarative.aauth).
+  # With this on, the controller injects AAUTH_ENABLED=true + the projected
+  # SA token volume into every declarative agent's pod, so all outbound
+  # HTTP calls get RFC 9421 signed. The signed traffic to external LLMs
+  # gets verified at `agentgateway` (`demo/substrate-poc/start-aauth-gateway.sh`).
+  defaultAAuthEnabled: true
+  # Turn on the controller's AAuth issuer endpoints (/.well-known/jwks.json
+  # and POST /aauth/agent-jwt). Required when defaultAAuthEnabled=true: the
+  # agent signer pods POST their projected SA token to /aauth/agent-jwt to
+  # mint an aa-agent+jwt that they then embed in every outbound request.
+  # extauth-aauth-resource (`start-aauth-gateway.sh`) fetches /.well-known/jwks.json
+  # to verify those JWTs.
+  #
+  # Local-dev URL — the script port-forwards the controller to :8083, so
+  # extauth talks to the issuer at this address.
+  aauth:
+    issuerUrl: "http://localhost:8083"
   image:
     registry: localhost:5001
     repository: kagent-dev/kagent/controller

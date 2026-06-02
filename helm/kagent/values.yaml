@@ -154,6 +154,12 @@ controller:
   # When substrate.enabled=true, flip this to "sandbox" so the whole install
   # opts into substrate by default; users can still override per-agent.
   defaultWorkloadMode: "deployment"
+  # -- Default for spec.declarative.aauth.enabled on declarative Agent CRs
+  # that don't set it explicitly. false (legacy default) keeps AAuth opt-in
+  # per-agent. Flip to true to enable AAuth signing for every declarative
+  # Agent in this install; individual agents can still opt out via
+  # `spec.declarative.aauth.enabled: false`.
+  defaultAAuthEnabled: false
   # -- Global deployment defaults applied to all agent pods.
   # Per-agent settings in the Agent CRD take precedence over these defaults.
   agentDeployment:

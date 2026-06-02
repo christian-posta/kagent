@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // HTTP path constants exposed by the Agent Provider.
@@ -21,9 +23,16 @@ const (
 // in the body is optional; if present it must match the derived identity,
 // otherwise the mint is rejected. PublicKeyJWK is the agent's ephemeral
 // signing public key, bound into the minted JWT via the cnf.jwk claim.
+//
+// SubstrateActorID, when non-empty, selects the substrate-aware mint path
+// (used when the agent runs as a substrate actor instead of a regular pod).
+// In that path the bearer token is the worker pod's SA token and identity
+// is resolved by chaining TokenReview → substrate Control.GetActor → kagent
+// labels on the ActorTemplate. See SubstrateSubjectAuthenticator.
 type AgentJWTRequest struct {
-	Sub          string                 `json:"sub,omitempty"`
-	PublicKeyJWK map[string]interface{} `json:"public_key_jwk"`
+	Sub              string                 `json:"sub,omitempty"`
+	PublicKeyJWK     map[string]interface{} `json:"public_key_jwk"`
+	SubstrateActorID string                 `json:"substrate_actor_id,omitempty"`
 }
 
 // AgentJWTResponse is the body of a successful POST /aauth/agent-jwt.
@@ -59,25 +68,23 @@ func HandleAgentMetadata(issuer *Issuer) http.HandlerFunc {
 //
 // The endpoint is bypassed by the regular AAuth-aware authn middleware
 // (the caller has no AAuth identity yet — that's the whole point of this
-// call). Workload identity is established here by validating the caller's
-// Kubernetes ServiceAccount token via TokenReview. The canonical sub is
-// derived from the SA identity; the body's sub field is only accepted if
-// it matches.
-func HandleIssueAgentJWT(issuer *Issuer, auth SubjectAuthenticator) http.HandlerFunc {
+// call). Workload identity is established by one of two paths, autodetected
+// from the request body:
+//
+//   - Default (deployment-mode agents): validate the caller's K8s SA token
+//     via TokenReview, derive sub from system:serviceaccount:<ns>:<name>.
+//   - Substrate (when body.substrate_actor_id is set): chain TokenReview →
+//     substrate Control.GetActor placement attestation → kagent labels on
+//     the ActorTemplate, see SubstrateSubjectAuthenticator.
+//
+// The body's sub field is only accepted if it matches the derived identity.
+//
+// substrateAuth may be nil — substrate-aware mint is then unavailable and a
+// substrate-flavored request returns 400 instead of attempting the default
+// path (which would always fail since the worker SA isn't a per-agent SA).
+func HandleIssueAgentJWT(issuer *Issuer, auth SubjectAuthenticator, substrateAuth *SubstrateSubjectAuthenticator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer func() { _ = r.Body.Close() }()
-
-		bearer := BearerTokenFromAuthorizationHeader(r.Header.Get("Authorization"))
-		if bearer == "" {
-			writeJSONError(w, http.StatusUnauthorized, "missing or invalid Authorization header (expected Bearer <serviceaccount-token>)")
-			return
-		}
-
-		derivedSub, err := auth.Authenticate(r.Context(), bearer)
-		if err != nil {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("token validation failed: %s", err))
-			return
-		}
 
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
 		if err != nil {
@@ -93,9 +100,48 @@ func HandleIssueAgentJWT(issuer *Issuer, auth SubjectAuthenticator) http.Handler
 			writeJSONError(w, http.StatusBadRequest, "public_key_jwk is required")
 			return
 		}
-		if req.Sub != "" && req.Sub != derivedSub {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("body sub %q does not match ServiceAccount-derived sub %q", req.Sub, derivedSub))
-			return
+
+		var derivedSub string
+		if req.SubstrateActorID != "" {
+			// Substrate path: source-IP + actor placement attestation. No
+			// bearer is required (substrate's restricted container schema
+			// can't mount an SA token into the actor's gVisor sandbox).
+			if substrateAuth == nil {
+				writeJSONError(w, http.StatusBadRequest, "substrate_actor_id was sent but the controller has no substrate authenticator configured")
+				return
+			}
+			derivedSub, err = substrateAuth.AuthenticateActor(r.Context(), r.RemoteAddr, req.SubstrateActorID, req.Sub)
+			if err != nil {
+				ctrllog.FromContext(r.Context()).Info("aauth: substrate mint rejected",
+					"remoteAddr", r.RemoteAddr,
+					"substrate_actor_id", req.SubstrateActorID,
+					"claimed_sub", req.Sub,
+					"reason", err.Error(),
+				)
+				writeJSONError(w, http.StatusForbidden, fmt.Sprintf("substrate attestation failed: %s", err))
+				return
+			}
+			ctrllog.FromContext(r.Context()).Info("aauth: substrate mint allowed",
+				"remoteAddr", r.RemoteAddr,
+				"substrate_actor_id", req.SubstrateActorID,
+				"sub", derivedSub,
+			)
+		} else {
+			// Deployment-mode path: K8s SA token via TokenReview.
+			bearer := BearerTokenFromAuthorizationHeader(r.Header.Get("Authorization"))
+			if bearer == "" {
+				writeJSONError(w, http.StatusUnauthorized, "missing or invalid Authorization header (expected Bearer <serviceaccount-token>)")
+				return
+			}
+			derivedSub, err = auth.Authenticate(r.Context(), bearer)
+			if err != nil {
+				writeJSONError(w, http.StatusForbidden, fmt.Sprintf("token validation failed: %s", err))
+				return
+			}
+			if req.Sub != "" && req.Sub != derivedSub {
+				writeJSONError(w, http.StatusForbidden, fmt.Sprintf("body sub %q does not match ServiceAccount-derived sub %q", req.Sub, derivedSub))
+				return
+			}
 		}
 
 		token, err := issuer.MintAgentJWT(derivedSub, req.PublicKeyJWK)

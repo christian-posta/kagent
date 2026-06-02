@@ -531,11 +531,26 @@ func aauthProjectedTokenVolume() corev1.Volume {
 	}
 }
 
+// aauthEnabled reports whether this agent should ship the AAuth signer +
+// env vars. AAuth is a declarative-only feature today. The decision flow:
+//
+//	non-declarative          → false
+//	spec.aauth set explicitly → use that
+//	spec.aauth unset          → fall back to v1alpha2.DefaultAAuthEnabled()
+//
+// The package default is wired from --default-aauth-enabled / helm value
+// `controller.defaultAAuthEnabled`. This lets an install opt every
+// declarative agent into AAuth without touching individual Agent CRs,
+// while still allowing per-agent opt-out (set `aauth.enabled: false`).
 func aauthEnabled(agent v1alpha2.AgentObject) bool {
 	spec := agent.GetAgentSpec()
-	return spec.Declarative != nil &&
-		spec.Declarative.AAuth != nil &&
-		spec.Declarative.AAuth.Enabled
+	if spec.Declarative == nil {
+		return false
+	}
+	if spec.Declarative.AAuth != nil {
+		return spec.Declarative.AAuth.Enabled
+	}
+	return v1alpha2.DefaultAAuthEnabled()
 }
 
 func buildContainerSecurityContext(

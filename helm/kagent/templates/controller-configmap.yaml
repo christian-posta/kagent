@@ -58,6 +58,7 @@ data:
   WATCH_NAMESPACES: {{ include "kagent.watchNamespaces" . | quote }}
   ZAP_LOG_LEVEL: {{ .Values.controller.loglevel | quote }}
   DEFAULT_WORKLOAD_MODE: {{ .Values.controller.defaultWorkloadMode | default "deployment" | quote }}
+  DEFAULT_AAUTH_ENABLED: {{ .Values.controller.defaultAAuthEnabled | default false | quote }}
   {{- if .Values.substrate.enabled }}
   # Substrate sandbox backend. Setting SUBSTRATE_WORKER_POOL_NAME is the
   # opt-in signal; the controller's app.LoadFromEnv maps each SUBSTRATE_*

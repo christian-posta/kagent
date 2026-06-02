@@ -155,13 +155,21 @@ class AAuthSigner:
         self._refresh_lock: asyncio.Lock | None = None
         self._last_refresh_attempt: float = 0.0
 
-        if controller_url:
+        # In substrate mode the actor's golden snapshot is taken *before*
+        # substrate's Control plane has an actor record for this instance, so
+        # an eager startup mint would always fail and bake the hwk-fallback
+        # state into the snapshot for every resume. Skip the sync mint;
+        # ensure_fresh_jwt() will mint lazily on the first outbound call after
+        # the actor is instantiated.
+        in_substrate = bool(os.environ.get("KAGENT_SUBSTRATE_ACTOR_ID", "").strip())
+        if controller_url and not in_substrate:
             self._fetch_jwt_sync(controller_url)
 
         logger.info(
-            "AAuth signing enabled — agent_id=%s scheme=%s",
+            "AAuth signing enabled — agent_id=%s scheme=%s substrate=%s",
             agent_id,
             self._sig_scheme,
+            in_substrate,
         )
 
     def _build_jwt_request(self) -> tuple[str, dict[str, object], dict[str, str]]:
@@ -175,6 +183,16 @@ class AAuthSigner:
         url = self._controller_url.rstrip("/") + _AGENT_JWT_PATH  # type: ignore[union-attr]
         pub_jwk = _aauth_lib.public_key_to_jwk(self._public_key)
         body: dict[str, object] = {"sub": self._agent_id, "public_key_jwk": pub_jwk}
+        # When this agent runs as a substrate actor, the bearer below is the
+        # WORKER pod's SA token (substrate multiplexes many actors onto one
+        # worker, so there is no per-agent SA). The controller can't derive
+        # the agent identity from that token alone — pass our substrate actor
+        # id so the controller can chain (TokenReview → Control.GetActor →
+        # ActorTemplate labels) to resolve the canonical sub. See
+        # demo/substrate-poc/AAUTH-PLAN.md for the full verification chain.
+        substrate_actor_id = os.environ.get("KAGENT_SUBSTRATE_ACTOR_ID", "").strip()
+        if substrate_actor_id:
+            body["substrate_actor_id"] = substrate_actor_id
         headers: dict[str, str] = {}
         sa_token = _read_sa_token()
         if sa_token:
@@ -252,13 +270,19 @@ class AAuthSigner:
     async def ensure_fresh_jwt(self) -> None:
         """Re-mint the JWT if it is within the refresh window.
 
-        Called from async sign hooks before each request. No-op when the signer
-        is in hwk mode or when the current JWT is still comfortably valid.
-        Refreshes are serialised with an asyncio.Lock so a burst of concurrent
-        requests results in a single mint, and a recent failure is rate-limited
-        by ``_MIN_RETRY_SECONDS``.
+        Called from async sign hooks before each request. No-op when no
+        controller URL is configured (pseudonymous-only signer) or when the
+        current JWT is still comfortably valid. Refreshes are serialised with
+        an asyncio.Lock so a burst of concurrent requests results in a single
+        mint, and a recent failure is rate-limited by ``_MIN_RETRY_SECONDS``.
+
+        Substrate-mode agents start in hwk scheme (no eager mint at __init__
+        because the actor record doesn't yet exist in substrate at golden
+        snapshot time) and rely on this method to perform the first mint
+        lazily on the first outbound call. Once the mint succeeds the scheme
+        flips to jwt and subsequent refreshes are exp-driven as usual.
         """
-        if self._sig_scheme != "jwt" or not self._controller_url:
+        if not self._controller_url:
             return
         now = time.time()
         if self._jwt_exp - now > _REFRESH_WINDOW_SECONDS:

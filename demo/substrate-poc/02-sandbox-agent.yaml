@@ -11,7 +11,7 @@ spec:
   type: BYO
   byo:
     deployment:
-      image: localhost:5001/substrate-poc-agent:p3
+      image: localhost:5001/substrate-poc-agent:p5
       cmd: /usr/local/bin/uvicorn
       args:
         - agent:app

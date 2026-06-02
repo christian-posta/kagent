@@ -1,5 +1,14 @@
 # AAuth Demo — End-to-End Testing Guide
 
+> **Looking for substrate-mode AAuth?** This guide targets **deployment-mode**
+> kagent (every agent runs as a regular K8s Deployment) on the `kind-kagent`
+> cluster. For **substrate-mode** agents (sandbox actors, no per-agent
+> Deployment) on `kind-kagent-substrate`, use
+> [`demo/substrate-poc/DEMO.md`](../substrate-poc/DEMO.md) — its "AAuth
+> signing for every declarative agent" section is self-contained and uses
+> `demo/substrate-poc/start-aauth-gateway.sh` to stand up the same
+> agentgateway + extauth chain documented below.
+
 This guide walks through testing the kagent AAuth integration end to end:
 
 ```

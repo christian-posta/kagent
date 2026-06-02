@@ -64,7 +64,14 @@ resources:
 
     # Strip the AAuth signature headers before forwarding to the upstream backend.
     # The upstream (e.g. OpenAI) does not need to see them.
-    strip_signature_headers: true
+    #
+    # FLIPPED OFF for the substrate demo so agentgateway's accessLog policy
+    # can capture the raw Signature/Signature-Input/Signature-Key headers in
+    # /tmp/kagent-aauth-agentgateway.log (see agw-config.yaml's
+    # frontendPolicies.accessLog). In production this should be true — the
+    # upstream LLM API has no use for AAuth headers and there's no reason
+    # to leak signing material that far.
+    strip_signature_headers: false
 
     # Authority override for signature verification.
     #

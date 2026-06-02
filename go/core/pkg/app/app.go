@@ -61,6 +61,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/openclaw"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/openshell"
+	substratebackend "github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/substrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/substrate/harness"
 	"github.com/kagent-dev/kagent/go/core/pkg/translator"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -146,6 +147,11 @@ type Config struct {
 	// (Substrate.WorkerPoolName set), helm typically flips this to "sandbox"
 	// so the whole install opts into substrate by default.
 	DefaultWorkloadMode string
+	// DefaultAAuthEnabled is the install-wide fallback for declarative
+	// Agents that don't set `spec.declarative.aauth`. False matches legacy
+	// opt-in behavior; flip true to enable AAuth signing on every
+	// declarative agent without editing per-agent CRs.
+	DefaultAAuthEnabled bool
 	HttpServerAddr     string
 	WatchNamespaces    string
 	A2ABaseUrl         string
@@ -252,6 +258,8 @@ func (cfg *Config) SetFlags(commandLine *flag.FlagSet) {
 	commandLine.StringVar(&cfg.Auth.UserIDClaim, "auth-user-id-claim", "sub", "JWT claim name for user identity")
 
 	commandLine.StringVar(&cfg.DefaultWorkloadMode, "default-workload-mode", "deployment", `Default workload mode for Agent CRs that don't set spec.workloadMode. One of "deployment" (per-agent Deployment, the default) or "sandbox" (route through the configured sandbox backend, e.g. substrate).`)
+
+	commandLine.BoolVar(&cfg.DefaultAAuthEnabled, "default-aauth-enabled", false, "Default value for spec.declarative.aauth.enabled on declarative Agent CRs that don't set it explicitly. When true, every declarative agent ships with AAuth signing enabled; per-agent aauth.enabled:false still opts out.")
 
 	commandLine.StringVar(&agent_translator.DefaultImageConfig.Registry, "image-registry", agent_translator.DefaultImageConfig.Registry, "The registry to use for the image.")
 	commandLine.StringVar(&agent_translator.DefaultImageConfig.Tag, "image-tag", agent_translator.DefaultImageConfig.Tag, "The tag to use for the image.")
@@ -426,6 +434,12 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 	// Empty string is fine — SetDefaultWorkloadMode ignores unknown values
 	// and the package default ("deployment") stays in place.
 	v1alpha2.SetDefaultWorkloadMode(v1alpha2.WorkloadMode(cfg.DefaultWorkloadMode))
+
+	// Install-wide AAuth default for declarative agents that don't set
+	// spec.declarative.aauth. The translator's aauthEnabled() consults this
+	// before deciding whether to project the controller-token volume + inject
+	// the AAUTH_ENABLED env vars on the agent pod.
+	v1alpha2.SetDefaultAAuthEnabled(cfg.DefaultAAuthEnabled)
 
 	logger := zap.New(zap.UseFlagOptions(&opts))
 	ctrl.SetLogger(logger)
@@ -865,9 +879,10 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 	// controller restarts (otherwise every restart would invalidate every
 	// outstanding aa-agent+jwt).
 	var (
-		aauthIssuer   *aauth.Issuer
-		aauthSubject  aauth.SubjectAuthenticator
-		aauthVerifier *aauth.Verifier
+		aauthIssuer    *aauth.Issuer
+		aauthSubject   aauth.SubjectAuthenticator
+		aauthSubstrate *aauth.SubstrateSubjectAuthenticator
+		aauthVerifier  *aauth.Verifier
 	)
 	if issURL := os.Getenv("AAUTH_ISSUER_URL"); issURL != "" {
 		priv, pub, kid, err := aauth.LoadOrGenerateIssuerKey(ctx, mgr.GetConfig(), kagentNamespace, aauth.IssuerSecretName)
@@ -897,6 +912,30 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		}
 		setupLog.Info("AAuth issuer enabled", "issuerURL", issURL, "kid", kid, "secret", kagentNamespace+"/"+aauth.IssuerSecretName)
 
+		// Substrate-aware mint path. Available only when (a) the active
+		// sandbox backend is substrate and (b) it has a live Control client
+		// (otherwise we have no way to attest actor-to-worker placement, so
+		// substrate-mode mint requests would have nothing to chain against).
+		// Tokens here are NOT audience-scoped: substrate's restricted
+		// container schema has no volume mounts, so the actor presents the
+		// worker pod's default projected SA token instead of an audience-
+		// bound one. The four-link verification chain (TokenReview pod
+		// identity + Control.GetActor placement + ActorTemplate labels) is
+		// what makes this safe in the absence of audience scoping. See
+		// demo/substrate-poc/AAUTH-PLAN.md (open question #2 documents the
+		// audience hardening follow-up that needs WorkerPool template
+		// changes).
+		if sb, ok := extensionCfg.SandboxBackend.(*substratebackend.Backend); ok {
+			if cc := sb.ControlClient(); cc != nil {
+				aauthSubstrate = &aauth.SubstrateSubjectAuthenticator{
+					Substrate: cc,
+				}
+				setupLog.Info("AAuth substrate authenticator enabled")
+			} else {
+				setupLog.Info("AAuth substrate authenticator skipped: substrate backend has no Control client")
+			}
+		}
+
 		// Phase 3: install the AAuth verification middleware on the controller's
 		// HTTP server. Default mode is log-only so a misconfiguration won't 401
 		// existing traffic; set AAUTH_VERIFY_MODE=enforce to gate.
@@ -925,9 +964,10 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		SandboxBackend:            extensionCfg.SandboxBackend,
 		AgentHarnessGateway:       agentHarnessGatewayCfg,
 		SubstrateHarnessClient:    substrateHarnessClient,
-		AAuthIssuer:               aauthIssuer,
-		AAuthSubjectAuthenticator: aauthSubject,
-		AAuthVerifier:             aauthVerifier,
+		AAuthIssuer:                 aauthIssuer,
+		AAuthSubjectAuthenticator:   aauthSubject,
+		AAuthSubstrateAuthenticator: aauthSubstrate,
+		AAuthVerifier:               aauthVerifier,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create HTTP server")

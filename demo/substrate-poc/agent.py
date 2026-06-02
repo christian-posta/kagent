@@ -138,7 +138,7 @@ import json
 from fastapi.responses import StreamingResponse
 
 
-def _build_task(req_text: str, req_counter: int) -> dict:
+def _build_task(req_text: str, req_counter: int, context_id: str) -> dict:
     reply = (
         f"echo from substrate-poc agent ({STARTUP_UUID[:8]}, "
         f"request #{req_counter}): {req_text}"
@@ -146,7 +146,11 @@ def _build_task(req_text: str, req_counter: int) -> dict:
     return {
         "kind": "task",
         "id": str(uuid.uuid4()),
-        "contextId": str(uuid.uuid4()),
+        # A2A: the task's contextId MUST echo the inbound message's contextId
+        # so the client (UI / curl) can correlate the response to its session.
+        # The UI's chat panel keys rendered history by contextId — a fresh
+        # random one here makes the response invisible in the chat.
+        "contextId": context_id,
         "status": {"state": "completed"},
         "artifacts": [{
             "artifactId": str(uuid.uuid4()),
@@ -166,6 +170,13 @@ def _extract_text(payload: dict) -> str:
     )
 
 
+def _extract_context_id(payload: dict) -> str:
+    """Echo back the client's contextId; generate one if absent."""
+    msg = payload.get("params", {}).get("message", {}) or {}
+    cid = msg.get("contextId")
+    return cid if cid else str(uuid.uuid4())
+
+
 @app.post("/")
 async def a2a_rpc(payload: dict):
     global _counter
@@ -173,29 +184,48 @@ async def a2a_rpc(payload: dict):
     method = payload.get("method", "")
     req_id = payload.get("id")
 
+    ctx_id = _extract_context_id(payload)
+
     if method == "message/send":
         return JSONResponse({
             "jsonrpc": "2.0",
             "id": req_id,
-            "result": _build_task(_extract_text(payload), _counter),
+            "result": _build_task(_extract_text(payload), _counter, ctx_id),
         })
 
     if method == "message/stream":
-        task = _build_task(_extract_text(payload), _counter)
+        # Build the task but DON'T attach the artifact to the initial task
+        # event — the kagent UI's `handleMessageEvent` treats `kind: task`
+        # events as a "streaming started" signal and discards anything
+        # inside. The actual reply must arrive as a separate
+        # `kind: artifact-update` event. See
+        # ui/src/lib/messageHandlers.ts:1086 and 1096.
+        task = _build_task(_extract_text(payload), _counter, ctx_id)
+        artifact = task.pop("artifacts")[0]  # detach for the artifact-update
 
         async def _events():
-            # A2A streaming protocol requires a terminal status-update event
-            # with `final: true` so the client knows the task is done. Without
-            # it the UI's SSE consumer hangs in "thinking" mode forever (even
-            # though the task body already says state=completed).
+            # A2A streaming sequence the kagent UI expects (mirrors what the
+            # real kagent ADK emits — see
+            # python/packages/kagent-adk/src/kagent/adk/_agent_executor.py):
             #
-            # We emit:
-            #   1. The full task object (kind=task, state=completed)
-            #   2. A status-update event (final=true)
-            # which is what the real kagent ADK does — see
-            # python/packages/kagent-adk/src/kagent/adk/_agent_executor.py.
+            #   1. `kind: task`           — opens the task (no artifact yet)
+            #   2. `kind: artifact-update` — carries the actual reply text
+            #   3. `kind: status-update`   — final=true, closes the stream
             task_event = {"jsonrpc": "2.0", "id": req_id, "result": task}
             yield f"data: {json.dumps(task_event)}\n\n"
+
+            artifact_update = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "kind": "artifact-update",
+                    "taskId": task["id"],
+                    "contextId": task["contextId"],
+                    "artifact": artifact,
+                    "lastChunk": True,
+                },
+            }
+            yield f"data: {json.dumps(artifact_update)}\n\n"
 
             status_update = {
                 "jsonrpc": "2.0",

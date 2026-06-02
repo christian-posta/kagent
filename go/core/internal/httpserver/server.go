@@ -87,6 +87,11 @@ type ServerConfig struct {
 	// POST /aauth/agent-jwt and returns the canonical agent identifier.
 	// Required when AAuthIssuer is set.
 	AAuthSubjectAuthenticator aauth.SubjectAuthenticator
+	// AAuthSubstrateAuthenticator handles mint requests from declarative
+	// agents that run as substrate actors (request body carries
+	// substrate_actor_id). nil disables the substrate mint path; deployment-
+	// mode mints still work via AAuthSubjectAuthenticator.
+	AAuthSubstrateAuthenticator *aauth.SubstrateSubjectAuthenticator
 	// AAuthVerifier runs AAuth HTTP Message Signature verification on
 	// inbound API requests. nil disables verification (legacy behavior).
 	// Phase 3.
@@ -352,7 +357,7 @@ func (s *HTTPServer) setupRoutes() {
 	if s.config.AAuthIssuer != nil {
 		s.router.HandleFunc(aauth.PathJWKS, aauth.HandleJWKS(s.config.AAuthIssuer)).Methods(http.MethodGet)
 		s.router.HandleFunc(aauth.PathAgentMetadata, aauth.HandleAgentMetadata(s.config.AAuthIssuer)).Methods(http.MethodGet)
-		s.router.HandleFunc(aauth.PathAgentJWT, aauth.HandleIssueAgentJWT(s.config.AAuthIssuer, s.config.AAuthSubjectAuthenticator)).Methods(http.MethodPost)
+		s.router.HandleFunc(aauth.PathAgentJWT, aauth.HandleIssueAgentJWT(s.config.AAuthIssuer, s.config.AAuthSubjectAuthenticator, s.config.AAuthSubstrateAuthenticator)).Methods(http.MethodPost)
 	}
 
 	// Use middleware for common functionality (first registered runs outermost on incoming requests).
