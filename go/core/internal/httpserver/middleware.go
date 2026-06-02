@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/kagent-dev/kagent/go/core/internal/httpserver/handlers"
@@ -79,9 +80,32 @@ func (w *statusResponseWriter) RespondWithError(err error) {
 
 func contentTypeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" && r.URL.Path != APIPathSandboxSSH {
+		if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" &&
+			r.URL.Path != APIPathSandboxSSH &&
+			!isAgentHarnessGatewayPath(r.URL.Path) {
 			w.Header().Set("Content-Type", "application/json")
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isAgentHarnessGatewayPath returns true for any path served by the
+// substrate AgentHarness gateway proxy (registered with PathPrefix
+// `APIPathAgentHarnesses + "/{namespace}/{name}/"`). The proxy forwards
+// arbitrary content types from the actor pod (text/html for the openclaw
+// Control UI, application/javascript for its bundle, image/png for icons,
+// etc.) — we must NOT clobber the upstream's Content-Type with
+// application/json or the browser refuses to render it (and the global
+// X-Content-Type-Options: nosniff header forbids it from sniffing).
+//
+// Matches: /api/agentharnesses/<ns>/<name>/...
+// Misses:  /api/agentharnesses (exact) and /api/agentharnesses/ (POST create)
+func isAgentHarnessGatewayPath(p string) bool {
+	const prefix = APIPathAgentHarnesses + "/"
+	if !strings.HasPrefix(p, prefix) {
+		return false
+	}
+	// Need at least <ns>/<name>/ after the prefix.
+	rest := p[len(prefix):]
+	return strings.Count(rest, "/") >= 2
 }

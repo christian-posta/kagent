@@ -131,10 +131,15 @@ func AgentResourceFrom(agent v1alpha2.AgentObject) *AgentResource {
 	return res
 }
 
-// OpenshellAgentHarnessListEntry is set when this row is a kagent.dev/v1alpha2 AgentHarness (openshell backend),
-// merged into GET /api/agents for UI alongside Agent CRs.
+// OpenshellAgentHarnessListEntry is set when this row is a kagent.dev/v1alpha2 AgentHarness,
+// merged into GET /api/agents for UI alongside Agent CRs. Despite the legacy `Openshell` name,
+// this carries both openshell-backed and substrate-backed harnesses — the UI inspects
+// `Runtime` to decide which connection path to use:
+//   - runtime=openshell → SSH terminal at /api/sandbox/ssh
+//   - runtime=substrate → HTTP gateway proxy at /api/agentharnesses/<ns>/<name>/gateway/
 type OpenshellAgentHarnessListEntry struct {
 	Backend            v1alpha2.AgentHarnessBackendType `json:"backend"`
+	Runtime            v1alpha2.AgentHarnessRuntime     `json:"runtime,omitempty"`
 	GatewaySandboxName string                           `json:"gatewaySandboxName"`
 	ModelConfigRef     string                           `json:"modelConfigRef,omitempty"`
 	BackendRefID       string                           `json:"backendRefId,omitempty"`

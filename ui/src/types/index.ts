@@ -415,9 +415,17 @@ export interface Agent {
   };
 }
 
-/** Merged into GET /api/agents for kagent.dev/v1alpha2 AgentHarness (openshell). */
+/** Merged into GET /api/agents for kagent.dev/v1alpha2 AgentHarness.
+ *  Carries both openshell-backed and substrate-backed harnesses — inspect
+ *  `runtime` to decide which connection path to use:
+ *    - "openshell" → SSH terminal at /openshell?sandbox=<gatewaySandboxName>
+ *    - "substrate" → HTTP gateway proxy at /api/agentharnesses/<ns>/<name>/gateway/
+ */
 export interface OpenshellAgentHarnessListEntry {
   backend: string;
+  /** Which control plane provisions the harness VM. Defaults to "openshell"
+   *  for legacy AgentHarness CRs that don't set spec.runtime explicitly. */
+  runtime?: "openshell" | "substrate";
   /** Gateway sandbox name for SSH (`namespace-name`); pass as `/openshell` `sandbox` query param. */
   gatewaySandboxName: string;
   modelConfigRef?: string;

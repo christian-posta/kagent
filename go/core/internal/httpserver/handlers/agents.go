@@ -100,8 +100,16 @@ func (h *AgentsHandler) openshellAgentHarnessAgentResponse(ctx context.Context, 
 
 	gatewayName := fmt.Sprintf("%s-%s", sb.Namespace, sb.Name)
 	desc := strings.TrimSpace(sb.Spec.Description)
+	// Default to openshell for harnesses that don't set spec.runtime
+	// (the field was added when substrate was introduced as a peer backend;
+	// legacy openshell-only harnesses leave it empty).
+	runtime := sb.Spec.Runtime
+	if runtime == "" {
+		runtime = v1alpha2.AgentHarnessRuntimeOpenshell
+	}
 	entry := &api.OpenshellAgentHarnessListEntry{
 		Backend:            sb.Spec.Backend,
+		Runtime:            runtime,
 		GatewaySandboxName: gatewayName,
 		ModelConfigRef:     sb.Spec.ModelConfigRef,
 	}

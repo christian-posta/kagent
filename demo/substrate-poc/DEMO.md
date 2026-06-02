@@ -185,6 +185,27 @@ docker build -t localhost:5001/substrate-poc-agent:p5 demo/substrate-poc \
   && docker push localhost:5001/substrate-poc-agent:p5
 ```
 
+> **Why `:p5` and not `:p3`.** Two bugs surfaced when driving this
+> agent through the UI chat panel (not present in the `curl` happy
+> path). Both are fixed in `agent.py` on this branch:
+>
+> 1. The agent generated a fresh random `contextId` on every reply
+>    instead of echoing back the one the UI sent. The UI's chat panel
+>    keys rendered history by `contextId`, so replies with a mismatched
+>    `contextId` were silently dropped from the rendered chat.
+> 2. The agent crammed the full artifact into the initial `kind: task`
+>    SSE event. The UI's `handleMessageEvent` (see
+>    `ui/src/lib/messageHandlers.ts:1086`) treats `kind: task` events as
+>    a "streaming started" marker and discards their body — it expects
+>    the actual reply text in subsequent `kind: artifact-update` events.
+>    The fix emits the correct sequence: `task` (open) →
+>    `artifact-update` (carries text + `lastChunk: true`) →
+>    `status-update` (`final: true`).
+>
+> The original `curl` examples below kept working with `:p3` because
+> they read the JSON response body directly rather than going through
+> the UI's event-handler chain.
+
 ## Install kagent via helm (~1 min)
 
 ```bash
@@ -408,6 +429,66 @@ open http://localhost:18093/api/agentharnesses/kagent/openclaw-test/gateway/
 > ```bash
 > kubectl ate suspend actor ahr-<ns>-<name>
 > # The harness controller's next reconcile resumes it on a live worker.
+> ```
+
+#### Suspend / resume behavior
+
+`AgentHarness` actors **do NOT auto-suspend** today — the controller's
+`substrate-idle-suspender` only sweeps `Agent` CRs. The openclaw VM
+stays `STATUS_RUNNING` indefinitely once it's resumed, holding one
+worker slot in the per-harness `WorkerPool`. See SUBSTRATE.md §26d for
+why we left this out (cold-restore storms with the 30s idle timeout)
+and what a real fix would look like.
+
+What DOES work:
+
+| Scenario | Behavior |
+|---|---|
+| Idle for >30s | Actor stays Running. Worker stays ASSIGNED. Substrate-page UI shows this. |
+| `kubectl ate suspend actor ahr-kagent-openclaw-demo` | Substrate checkpoints the full openclaw process memory to rustfs. Worker flips to FREE. |
+| Next gateway request after manual suspend | Substrate auto-resumes from the checkpoint via `runsc restore`. ~14-18s cold path (the six fork patches at the top of this doc bump atenet timeouts to 60s precisely for this). Same Python/openclaw process resumes — logged-in state, terminal scrollback, etc. preserved. |
+| Re-apply the AgentHarness with the **same** name | Existing actor + snapshot reused. Sub-second. |
+| Re-apply with a **different** name (or after a clear-state recovery) | Fresh golden snapshot baked from the ActorTemplate. ~5 min on first apply (image pull + ActorTemplate Resume + Checkpoint). |
+| Worker pod deleted mid-run | Actor wedges in `STATUS_RESUMING` pointing at the dead pod (see "Troubleshooting: actor wedged in Resuming" below for recovery). |
+
+To exercise the suspend/resume path manually:
+
+```bash
+# IMPORTANT: close any browser tab open at the gateway URL first — see
+# the gotcha below. Then:
+kubectl ate suspend actor ahr-kagent-openclaw-demo
+
+# Reload the gateway tab in your browser — first hit will block ~15s
+# (cold restore) then render the Control UI. Subsequent hits <1s.
+```
+
+> **Suspend gotcha: close the OpenClaw UI tab first.** If any browser
+> tab is open at the gateway URL when you run `kubectl ate suspend
+> actor`, the suspend hangs for 2 minutes and then fails with:
+>
+> ```
+> workflow failed at step CallAteletSuspend:
+>   while checkpointing workload:
+>   rpc error: code = DeadlineExceeded
+> elapsed-time: 1m58s
+> ```
+>
+> The actor is then **wedged in `STATUS_SUSPENDING`** (workflow lock
+> has long since expired, but the state machine doesn't auto-recover).
+> See SUBSTRATE.md §26d for the underlying gVisor checkpoint constraint.
+>
+> Recovery for a wedged Suspending actor (same shape as the
+> wedged-Resuming case in the Troubleshooting section below):
+>
+> ```bash
+> kubectl delete agentharness -n kagent openclaw-demo --wait=false
+> kubectl patch agentharness -n kagent openclaw-demo --type=merge \
+>     -p '{"metadata":{"finalizers":[]}}'
+>
+> # Re-apply with a NEW name — the actor ID is derived from
+> # namespace+name, so reusing the same name inherits the wedged record.
+> sed 's/name: openclaw-demo/name: openclaw-demo-v2/' \
+>     demo/substrate-poc/06-openclaw-harness.yaml | kubectl apply -f -
 > ```
 
 ## Drive the same flow through the UI

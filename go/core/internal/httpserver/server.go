@@ -113,6 +113,7 @@ func NewHTTPServer(config ServerConfig) (*HTTPServer, error) {
 
 	h := handlers.NewHandlers(config.KubeClient, defaultModelConfig, config.DbClient, config.WatchedNamespaces, config.Authorizer, config.ProxyURL, config.Reconciler, config.SandboxBackend)
 	h.AgentHarnessGateway = config.AgentHarnessGateway
+	h.SubstrateHarnessClient = config.SubstrateHarnessClient
 	h.Substrate = handlers.NewSubstrateHandler(config.SubstrateHarnessClient)
 	return &HTTPServer{
 		config:        config,

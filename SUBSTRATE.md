@@ -1897,3 +1897,253 @@ or recreate the agent.
 Both filed here as PoC follow-ups; not in scope for the substrate-
 observability + AAuth-by-default branch. Worth picking up the next
 time someone touches the session handler or the chat UI.
+
+## 26. AgentHarness gateway fixes (2026-06-02)
+
+Three bugs surfaced while wiring the OpenClaw Control UI through the
+kagent UI for the first time end-to-end. All three are committed.
+
+### 26a. UI "open agent" button hardcoded to OpenShell SSH
+
+**Symptom.** Clicking the `openclaw-demo` card in the agent list
+opened `/openshell?sandbox=kagent-openclaw-demo&connect=1` which
+immediately failed with:
+
+```
+GetSandbox: rpc error: code = Unavailable desc =
+   name resolver error: produced zero addresses
+```
+
+The `/api/sandbox/ssh` WebSocket handler dials
+`openshell.openshell.svc.cluster.local:8080` — the OpenShell backend's
+gRPC. We don't run OpenShell on the substrate cluster, so the dial
+fails.
+
+**Root cause.** The UI's `isOpenshellSandboxRow()` helper returned true
+for ANY AgentHarness row that had `openshellAgentHarness.gatewaySandboxName`
+set — which is **all of them** in practice, including substrate-backed
+ones. The legacy field name was misleading the runtime decision.
+
+**Fix.** Added a `runtime` field to `OpenshellAgentHarnessListEntry` on
+the API response, populated from the AgentHarness CR's `spec.runtime`
+(defaults to `openshell` for legacy harnesses that don't set it). UI
+helpers `isOpenshellSandboxRow` and a new `isSubstrateHarnessRow` now
+inspect `runtime`. `AgentCard.tsx` and `AgentListView.tsx` route to:
+
+- **`runtime: openshell`** → `/openshell?sandbox=…` (legacy SSH terminal)
+- **`runtime: substrate`** → `/api/agentharnesses/<ns>/<name>/gateway/`
+  (controller's HTTP proxy to the openclaw VM's Control UI)
+- **everything else** (regular Agents) → `/agents/<ns>/<name>/chat`
+
+Files touched:
+- `go/api/httpapi/types.go` — `Runtime` field
+- `go/core/internal/httpserver/handlers/agents.go` — populates `runtime`
+- `ui/src/types/index.ts` — mirrors the field
+- `ui/src/lib/openshellSandboxAgents.ts` — `isSubstrateHarnessRow` +
+  `substrateHarnessGatewayHref` helpers
+- `ui/src/components/AgentCard.tsx`, `AgentListView.tsx` — three-way switch
+
+### 26b. Global content-type middleware clobbered gateway responses
+
+**Symptom.** Browser navigation to the OpenClaw gateway URL returned
+HTML, but the browser refused to render it. The HTML was tagged
+`Content-Type: application/json` so the browser treated it as malformed
+JSON — and the global `X-Content-Type-Options: nosniff` header forbade
+content-type sniffing.
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json    ← wrong; should be text/html
+X-Content-Type-Options: nosniff
+<!doctype html>...
+```
+
+**Root cause.** `httpserver/middleware.go::contentTypeMiddleware` ran
+**before** every `/api/*` handler and unconditionally set
+`Content-Type: application/json` on the response writer. The gateway
+proxy then forwarded the upstream openclaw response, but Go's
+`http.ResponseWriter.Header().Set()` from `httputil.ReverseProxy` was
+not winning the race against the middleware's pre-set header.
+
+**Fix.** Excluded the AgentHarness gateway path from the middleware
+(same shape as the existing `APIPathSandboxSSH` exclusion). New helper
+`isAgentHarnessGatewayPath()` matches `/api/agentharnesses/<ns>/<name>/...`.
+The proxy now passes through upstream Content-Types (`text/html`,
+`application/javascript`, `text/css`, `image/png`, etc.) intact.
+
+### 26c. GetActor storms ate-api on every page load → intermittent 503s
+
+**Symptom.** Even after fix 26b, a page load occasionally left the
+browser blank with errors like:
+
+```
+Loading module from "…/assets/string-coerce-LMp5Q49X.js" was blocked
+because of a disallowed MIME type ("text/plain")
+```
+
+A sequential hammer test (one curl at a time) showed ~1.5% of asset
+requests returned `HTTP 503 / Content-Type: text/plain` with body:
+
+```
+get substrate actor "ahr-kagent-openclaw-demo":
+   rpc error: code = Internal desc = internal server error
+```
+
+A **parallel** hammer (30 concurrent requests, what a browser actually
+does on a page load) blew that up to ~60% failure.
+
+**Root cause** (two layers, both needed for the fix):
+
+1. `agentharness_gateway.go::resolveSubstrateGatewayTarget` dialed a
+   fresh gRPC connection to ate-api on every request (`harness.Dial` +
+   `defer Close`). One layer of waste.
+2. More fundamentally, **ate-api itself fails `GetActor` under
+   parallel load** — returns `INTERNAL_SERVER_ERROR` from somewhere
+   inside its valkey lookup. Reusing the gRPC connection (singleton
+   client) didn't help because the calls themselves still hammered
+   ate-api at the same rate.
+
+A browser page-load fires ~10 asset requests in <1s. Each one was
+calling `GetActor`. ate-api stuttered. Our gateway handler turned the
+stutters into `503 text/plain` (via `http.Error()`), and the global
+`X-Content-Type-Options: nosniff` made the browser MIME-block the
+responses.
+
+**Fix.** Tiny TTL cache (3s) in front of `GetActor`, keyed by actor
+ID. First request in a page-load populates the cache; the rest hit
+the cache. Eliminates the storm entirely. 30 parallel asset requests
+now produce **one** upstream `GetActor` RPC, not 30.
+
+Code shape (in `agentharness_gateway.go`):
+
+```go
+var (
+    actorIPCacheMu sync.RWMutex
+    actorIPCache   = map[string]actorIPCacheEntry{}
+)
+
+// Fast path: serve from the TTL cache. A page load's ~10 parallel
+// asset requests collapse to one GetActor RPC every few seconds.
+podIP, cached := cachedActorPodIP(actorID)
+if !cached {
+    actor, err := ateClient.GetActor(ctx, actorID)
+    // ... validate pod IP ...
+    setCachedActorPodIP(actorID, podIP)
+}
+```
+
+The singleton-client reuse from the earlier round is still there
+(avoids per-request Dial cost on cache misses).
+
+**Trade-off.** 3s of staleness on actor migrations: if a worker recycles
+mid-cache-window, requests for up to 3s get the old pod IP and 502
+through the proxy. Short enough that a real migration recovers quickly,
+long enough to amortize one page load through a single upstream RPC.
+
+Hammer-test results:
+
+| Test | Before fix 26c | After singleton-only | After TTL cache |
+|---|---|---|---|
+| 100 sequential | ~1.5% bad | 0/100 | 0/100 |
+| 30 parallel | ~60% bad | ~60% bad (no improvement!) | 0/30 |
+
+Files touched:
+- `go/core/internal/httpserver/middleware.go` — added gateway exclusion
+- `go/core/internal/httpserver/handlers/handlers.go` — `SubstrateHarnessClient` field
+- `go/core/internal/httpserver/server.go` — wires the singleton into Handlers
+- `go/core/internal/httpserver/handlers/agentharness_gateway.go` — singleton + TTL cache
+
+### 26d. Manual suspend hangs while a browser tab is open
+
+**Symptom.** `kubectl ate suspend actor ahr-kagent-openclaw-demo`
+appears to hang for ~2 minutes and then returns nothing useful at the
+CLI. The actor ends up wedged in `STATUS_SUSPENDING`, the worker stays
+ASSIGNED, and no recovery happens automatically.
+
+**Diagnosis.** ate-api server log shows:
+
+```json
+{"method":"/ateapi.Control/SuspendActor",
+ "req":{"actor_id":"ahr-kagent-openclaw-demo"},
+ "err":"workflow failed at step CallAteletSuspend:
+        while checkpointing workload:
+        rpc error: code = DeadlineExceeded desc = context deadline exceeded",
+ "elapsed-time":"1m58s"}
+```
+
+The 2-minute deadline is the workflow lock TTL (120s after substrate
+fork patch #6, minus 2s padding). atelet's `runsc checkpoint` never
+completes within that window. For comparison, the BYO and Declarative
+agents' Checkpoints land in **1-4 seconds** on this same cluster.
+
+**Root cause.** gVisor's checkpoint can't cleanly freeze a process
+that has **active TCP connections with in-flight reads**. The OpenClaw
+Control UI in the browser holds a persistent WebSocket through the
+kagent gateway proxy to the actor pod's openclaw process. The sentry
+tries to drain network state, the goroutines blocked on `read()` never
+return, and `runsc checkpoint` waits forever (until the workflow
+deadline fires).
+
+**Workaround.** Close the browser tab(s) at
+`http://localhost:8088/api/agentharnesses/<ns>/<name>/gateway/`
+*before* invoking `kubectl ate suspend actor`. With no active gateway
+connections, the Checkpoint RPC completes in <5s.
+
+**Recovery from a wedged Suspending actor** (same shape as §22's
+wedged-Resuming):
+
+```bash
+kubectl delete agentharness -n kagent openclaw-demo --wait=false
+kubectl patch agentharness -n kagent openclaw-demo --type=merge \
+    -p '{"metadata":{"finalizers":[]}}'
+
+# Re-apply with a NEW name to escape the bricked valkey actor record.
+sed 's/name: openclaw-demo/name: openclaw-demo-v2/' \
+    demo/substrate-poc/06-openclaw-harness.yaml | kubectl apply -f -
+```
+
+**Possible real fixes**, none in scope here:
+
+1. **Drain active gateway connections before suspending.** Mirror what
+   atenet does on `ResumeActor` (it tracks in-flight requests) for
+   `SuspendActor`: close the kagent gateway proxy's pool to the actor
+   pod, wait for sockets to drain, then call SuspendActor. Requires
+   wiring from `agentharness_gateway.go` into the suspend path.
+2. **Use `runsc checkpoint --leave-running` semantics.** runsc has
+   options to leave the process running while writing the checkpoint
+   (best-effort, may produce inconsistent snapshots). Probably wrong
+   for openclaw because the openclaw process has stateful in-memory
+   workflows that need a stop-the-world snapshot.
+3. **Add a pre-suspend hook to openclaw.** Have openclaw close its
+   own WebSocket server with a brief grace window when it sees a
+   SIGTERM-equivalent signal, before runsc takes the actual
+   checkpoint. Requires openclaw cooperation.
+
+For now the user just needs to close the tab first; that's documented
+in DEMO.md's AgentHarness "Suspend gotcha" callout.
+
+### 26e. Open follow-up — AgentHarness auto-suspend
+
+**Gap.** The `substrate-idle-suspender` reconciler in the controller
+only sweeps `Agent` CRs (Declarative + BYO). `AgentHarness` CRs are
+**never** auto-suspended — the openclaw VM stays `STATUS_RUNNING`
+indefinitely once it's resumed, holding its worker pod.
+
+**Manual suspend works.** `kubectl ate suspend actor ahr-<ns>-<name>`
+writes a checkpoint to rustfs, frees the worker, and the next gateway
+request triggers an auto-resume from the snapshot. So the underlying
+mechanism is fine — the policy layer (idle sweeper) just doesn't
+target AgentHarnesses.
+
+**Why we left it off.** OpenClaw VMs have a longer warm-up cost
+(~14-18s cold restore) than Python agents, so a 30s-idle-suspend
+would create cold-restore storms on any interactive use. A real fix
+should:
+
+- Watch AgentHarness CRs alongside Agent CRs in the IdleSuspender
+- Use a separate, longer `idleTimeout` for harnesses (5-10 min)
+- Possibly opt-in per-harness via `spec.substrate.idleTimeout`
+
+Not in scope for the substrate-observability branch. See DEMO.md's
+"Suspend / resume behavior" section under the AgentHarness path for
+the user-facing description.

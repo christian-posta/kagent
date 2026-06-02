@@ -1,7 +1,32 @@
 import type { AgentResponse } from "@/types";
 
+/** True only for openshell-backed AgentHarness rows. Substrate-backed
+ *  harnesses ALSO populate `openshellAgentHarness` (legacy field name), but
+ *  the controller now sets `runtime` on the response so we can tell them
+ *  apart. Empty `runtime` defaults to "openshell" for legacy compatibility. */
 export function isOpenshellSandboxRow(item: AgentResponse): boolean {
-  return Boolean(item.openshellAgentHarness?.gatewaySandboxName);
+  const harness = item.openshellAgentHarness;
+  if (!harness?.gatewaySandboxName) return false;
+  const rt = harness.runtime ?? "openshell";
+  return rt === "openshell";
+}
+
+/** True for substrate-backed AgentHarness rows (`spec.runtime: substrate`).
+ *  These open via the controller's gateway proxy at
+ *  `/api/agentharnesses/<ns>/<name>/gateway/`, not the openshell SSH path. */
+export function isSubstrateHarnessRow(item: AgentResponse): boolean {
+  return item.openshellAgentHarness?.runtime === "substrate";
+}
+
+/** Gateway URL for a substrate-backed AgentHarness. Mirrors the path the
+ *  kagent controller's HTTP proxy registers in server.go
+ *  (`APIPathAgentHarnesses + "/{namespace}/{name}/"`). */
+export function substrateHarnessGatewayHref(item: AgentResponse): string | null {
+  if (!isSubstrateHarnessRow(item)) return null;
+  const ns = item.agent?.metadata?.namespace;
+  const name = item.agent?.metadata?.name;
+  if (!ns || !name) return null;
+  return `/api/agentharnesses/${ns}/${name}/gateway/`;
 }
 
 export type OpenshellTerminalLinkParams = {

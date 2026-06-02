@@ -8,6 +8,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -23,7 +24,48 @@ const (
 	openclawDefaultOperatorScopes = "operator.admin"
 	// Origin OpenClaw accepts by default for bind=lan port=80 (localhost/127.0.0.1 on gateway port).
 	openclawLoopbackOrigin = "http://127.0.0.1:80"
+
+	// gatewayActorIPCacheTTL bounds how stale the cached actor pod IP can be.
+	// A browser page load fires ~10 parallel asset requests in <1s; without
+	// caching, each request does its own GetActor RPC against ate-api, and
+	// ate-api fails INTERNAL_SERVER_ERROR on ~60% of those under that storm.
+	// 3s is long enough to amortize one page load across one upstream RPC,
+	// short enough that a real actor migration (suspend → resume on a
+	// different worker IP) propagates fast.
+	gatewayActorIPCacheTTL = 3 * time.Second
 )
+
+// actorIPCacheEntry caches the pod IP we resolved for an actor.
+type actorIPCacheEntry struct {
+	podIP   string
+	expires time.Time
+}
+
+// actorIPCache is a tiny TTL cache keyed by actor ID. Single source of
+// truth, gated by a sync.RWMutex (read-heavy under page-load traffic).
+var (
+	actorIPCacheMu sync.RWMutex
+	actorIPCache   = map[string]actorIPCacheEntry{}
+)
+
+func cachedActorPodIP(actorID string) (podIP string, ok bool) {
+	actorIPCacheMu.RLock()
+	e, present := actorIPCache[actorID]
+	actorIPCacheMu.RUnlock()
+	if !present || time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.podIP, true
+}
+
+func setCachedActorPodIP(actorID, podIP string) {
+	actorIPCacheMu.Lock()
+	actorIPCache[actorID] = actorIPCacheEntry{
+		podIP:   podIP,
+		expires: time.Now().Add(gatewayActorIPCacheTTL),
+	}
+	actorIPCacheMu.Unlock()
+}
 
 // AgentHarnessGatewayConfig configures Substrate harness HTTP/WebSocket proxy.
 // Traffic is proxied directly to the actor ateom pod IP on port 80 (no atenet-router fallback).
@@ -118,25 +160,44 @@ func (h *Handlers) resolveSubstrateGatewayTarget(ctx context.Context, ah *v1alph
 		return nil, "", fmt.Errorf("substrate ate-api is not configured on the controller")
 	}
 
-	ateClient, err := harness.Dial(ctx, harness.Config{
-		AteAPIEndpoint: cfg.AteAPIEndpoint,
-		Insecure:       cfg.AteAPIInsecure,
-		DialTimeout:    cfg.DialTimeout,
-		CallTimeout:    cfg.CallTimeout,
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("dial ate-api: %w", err)
-	}
-	defer ateClient.Close()
-
 	actorID := ah.Status.BackendRef.ID
-	actor, err := ateClient.GetActor(ctx, actorID)
-	if err != nil {
-		return nil, "", fmt.Errorf("get substrate actor %q: %w", actorID, err)
-	}
-	podIP := strings.TrimSpace(actor.GetAteomPodIp())
-	if podIP == "" {
-		return nil, "", fmt.Errorf("substrate actor %q has no pod IP (status %s; resume the actor and wait until running)", actorID, actor.GetStatus())
+
+	// Fast path: serve from the TTL cache so a page load's ~10 parallel
+	// asset requests only translate to one GetActor RPC every few seconds.
+	// Without this, ate-api falls over with INTERNAL_SERVER_ERROR under
+	// the parallel-asset storm.
+	podIP, cached := cachedActorPodIP(actorID)
+	if !cached {
+		// Reuse the controller's singleton harness.Client when available —
+		// avoids dialing a fresh gRPC connection per request. Fallback to
+		// per-request Dial keeps this working in unit tests / installs
+		// that didn't wire SubstrateHarnessClient.
+		var ateClient *harness.Client
+		if h.SubstrateHarnessClient != nil {
+			ateClient = h.SubstrateHarnessClient
+		} else {
+			var dialErr error
+			ateClient, dialErr = harness.Dial(ctx, harness.Config{
+				AteAPIEndpoint: cfg.AteAPIEndpoint,
+				Insecure:       cfg.AteAPIInsecure,
+				DialTimeout:    cfg.DialTimeout,
+				CallTimeout:    cfg.CallTimeout,
+			})
+			if dialErr != nil {
+				return nil, "", fmt.Errorf("dial ate-api: %w", dialErr)
+			}
+			defer ateClient.Close()
+		}
+
+		actor, err := ateClient.GetActor(ctx, actorID)
+		if err != nil {
+			return nil, "", fmt.Errorf("get substrate actor %q: %w", actorID, err)
+		}
+		podIP = strings.TrimSpace(actor.GetAteomPodIp())
+		if podIP == "" {
+			return nil, "", fmt.Errorf("substrate actor %q has no pod IP (status %s; resume the actor and wait until running)", actorID, actor.GetStatus())
+		}
+		setCachedActorPodIP(actorID, podIP)
 	}
 	target, host, err := substrateGatewayPodTarget(podIP)
 	if err != nil {

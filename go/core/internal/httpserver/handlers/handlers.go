@@ -8,6 +8,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/controller/reconciler"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
+	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/substrate/harness"
 )
 
 // Handlers holds all the HTTP handler components
@@ -19,6 +20,15 @@ type Handlers struct {
 	// needs them at this level too.
 	KubeClient          client.Client
 	AgentHarnessGateway *AgentHarnessGatewayConfig
+	// SubstrateHarnessClient is the same pre-dialed harness.Client that
+	// powers the /api/substrate observability endpoints. The AgentHarness
+	// gateway proxy reuses it so it doesn't open a fresh gRPC connection
+	// to ate-api on every request — under page-load parallelism (~10
+	// parallel asset fetches) the per-request dial was storming ate-api
+	// and getting intermittent INTERNAL_SERVER_ERROR responses, which the
+	// gateway then turned into 503 text/plain replies and broke the
+	// browser's MIME-typed asset loads.
+	SubstrateHarnessClient *harness.Client
 
 	Health              *HealthHandler
 	ModelConfig         *ModelConfigHandler
