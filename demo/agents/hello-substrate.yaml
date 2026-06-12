@@ -1,0 +1,31 @@
+# SandboxAgent — declarative agent running inside a substrate (gVisor) actor.
+#
+# Apply against a cluster that already has substrate + kagent set up via
+# demo/up.sh:
+#   kubectl apply -f demo/agents/hello-substrate.yaml --context kind-kagent-substrate
+#
+# Then chat with it from the kagent UI (Agents → kagent/hello-substrate).
+# Each chat session gets its own snapshot-restored gVisor actor, suspended
+# back to object storage between requests.
+apiVersion: kagent.dev/v1alpha2
+kind: SandboxAgent
+metadata:
+  name: hello-substrate
+  namespace: kagent
+spec:
+  type: Declarative
+  description: Tiny declarative agent running inside a substrate actor
+  declarative:
+    # `runtime: go` is required for substrate-backed declaratives. The Python
+    # ADK is rejected by spec validation (httpx state doesn't survive gVisor
+    # checkpoint reliably).
+    runtime: go
+    modelConfig: default-model-config
+    systemMessage: |
+      You are a friendly assistant living inside an Agent Substrate sandbox.
+      When asked who you are, say "I am hello-substrate, a Go ADK declarative
+      agent running inside a gVisor actor."
+  platform: substrate
+  substrate:
+    workerPoolRef:
+      name: kagent-default

@@ -1,0 +1,35 @@
+# AgentHarness — OpenClaw running inside a substrate (gVisor) actor.
+#
+# Apply against a cluster that already has substrate + kagent set up via
+# demo/up.sh:
+#   kubectl apply -f demo/agents/peterj-claw.yaml --context kind-kagent-substrate
+#
+# Then open the OpenClaw Control UI through the kagent proxy:
+#   Agents → kagent/peterj-claw  (token: test-token)
+#
+# spec.substrate.workloadImage points at the localhost:5001 mirror that
+# demo/up.sh produces. The upstream ghcr.io/kagent-dev/nemoclaw/sandbox-base
+# image cannot be pulled by atelet (HTTP/2 PROTOCOL_ERROR), so we mirror it.
+#
+# The mirror digest is deterministic given the pinned upstream digest
+# (sha256:d52bee415...) — Docker re-encodes the manifest on push but produces
+# the same result every time for the same input. If demo/up.sh ever pins a
+# different upstream version, the digest below needs to be updated. Get the
+# current local digest with:
+#   docker inspect localhost:5001/nemoclaw/sandbox-base:demo \
+#     --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep ^localhost
+apiVersion: kagent.dev/v1alpha2
+kind: AgentHarness
+metadata:
+  name: peterj-claw
+  namespace: kagent
+spec:
+  runtime: substrate
+  backend: openclaw
+  description: OpenClaw on Agent Substrate
+  modelConfigRef: default-model-config
+  substrate:
+    workerPoolRef:
+      name: kagent-default
+    gatewayToken: test-token
+    workloadImage: localhost:5001/nemoclaw/sandbox-base@sha256:d45725b8910de0a29ee03df2e72f7393bf3d1254a32b18dfbeb2d53739859407
